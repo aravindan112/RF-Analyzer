@@ -14,30 +14,45 @@ A browser-based RF signal analyzer for visualizing IQ data files.
 ## Project Structure
 ```
 RF-Analyzer/
-├── frontend/        # React/Vite frontend
+├── frontend/                   # React/Vite frontend
 │   └── src/
 │       └── components/
-├── IQ_Viewer/       # Python backend
+│           ├── SpectrumChart.jsx
+│           ├── SpectrogramChart.jsx
+│           ├── ConstellationChart.jsx
+│           ├── CfarChart.jsx
+│           ├── FilterResponseChart.jsx
+│           ├── IQTimeSeriesChart.jsx
+│           └── DoaChart.jsx
+├── IQ_Viewer/                  # Python backend
 │   ├── main_api.py
 │   ├── dsp_processing.py
 │   ├── data_loader.py
 │   └── data_manager.py
+└── .gitignore
 ```
 
 ## Requirements
 ### Frontend
 - Node.js
-- npm install
-- npm run dev
 
 ### Backend
 - Python 3.x
 
-### Commands (2 terminals one for frontend, one for backend)
--- For Frontend ---> cd frontend
-npm install( only use it if its the first time or for pulling after new changes)
-npm run dev
+## How to Run
 
--- For Backend --->cd IQ_Viewer
-pip install
+### Step 1 - Start Backend
+```bash
+cd IQ_Viewer
 python main_api.py
+```
+
+### Step 2 - Start Frontend (open a new terminal)
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend runs on: `http://localhost:5173`
+Backend runs on: `http://localhost:8000`
