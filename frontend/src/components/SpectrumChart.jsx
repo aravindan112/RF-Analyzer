@@ -9,8 +9,15 @@
  * This means there is exactly ONE code path that exits the loop,
  * and it is synchronous — no race windows.
  *
- * The loop ONLY starts from explicit user action (RUN button / param commit).
- * NO useEffect auto-starts the loop.
+ * TRAVERSAL DESIGN
+ * ────────────────
+ * positionMs is clamped only to [0, duration] in App.jsx — NOT by window size.
+ * Clamping by window broke traversal when window >= file duration (always gave 0).
+ * The backend handles short-tail slices gracefully so no frontend guard is needed.
+ *
+ * zsWindowMs is a prop lifted to App.jsx. The position-change useEffect is
+ * debounced 300ms and fires fetchZeroSpan() (stopped) or zs_start() (running).
+ * FREE RUN loop delay is 1000ms to avoid flooding the backend.
  */
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
@@ -116,6 +123,9 @@ export default function SpectrumChart({
   activeDatasetId, positionMs=0, windowMs=10, dspVersion=0, fftSize=1024,
   compareMode=false, compareIds=[], fileColors=['#00d4ff','#ff6b8a','#5ade9a','#ffc046'],
   onRemoveFile,
+  // zsWindowMs is lifted to App.jsx so the position bar clamps correctly
+  zsWindowMs: zsWindowMsProp = 100.0,
+  onZsWindowChange,
 }) {
   const [mode,      setMode]      = useState('freq');
   const [datasets,  setDatasets]  = useState({});
@@ -125,7 +135,12 @@ export default function SpectrumChart({
   const [normalise, setNormalise] = useState(false);
 
   const [centerMhz,      setCenterMhz]      = useState(0.0);
-  const [zsWindowMs,     setZsWindowMs]      = useState(100.0);
+  // FIX: zsWindowMs is now driven by prop; local setter notifies parent
+  const zsWindowMs = zsWindowMsProp;
+  const setZsWindowMs = useCallback((v) => {
+    if (onZsWindowChange) onZsWindowChange(v);
+  }, [onZsWindowChange]);
+
   const [zsFftSize,      setZsFftSize]       = useState(512);
   const [triggerMode,    setTriggerMode]     = useState('free');
   const [triggerLevelDb, setTriggerLevelDb]  = useState(-20.0);
@@ -138,7 +153,7 @@ export default function SpectrumChart({
   const [zsState,   setZsState]   = useState('stopped');
 
   const [revision, setRevision] = useState(0);
-  const [dims,     setDims]     = useState({ width:800, height:320 });
+  const [dims,     setDims]     = useState({ width:0, height:0 });
   const containerRef = useRef(null);
 
   // Live params — loop reads fresh values every iteration, never stale
@@ -151,8 +166,6 @@ export default function SpectrumChart({
     };
   });
 
-  // THE controller — one instance, replaced on each zs_start() call.
-  // Anything holding a reference to an old controller will see it aborted.
   const ctrlRef       = useRef(null);
   const fsFetchingRef = useRef(false);
 
@@ -189,10 +202,6 @@ export default function SpectrumChart({
   }, []);
 
   // ── zs_stop ───────────────────────────────────────────────────────────────
-  // Abort the controller. This simultaneously:
-  //   • Cancels any in-flight fetch (throws AbortError → loop exits)
-  //   • Resolves any pending inter-frame pause (via abort event listener)
-  // After this returns, the loop WILL exit — no further fetches possible.
   const zs_stop = useCallback(() => {
     if (ctrlRef.current) {
       ctrlRef.current.abort();
@@ -203,15 +212,10 @@ export default function SpectrumChart({
   }, []);
 
   // ── zs_start ─────────────────────────────────────────────────────────────
-  // Creates a fresh AbortController, aborts the old one first.
-  // The loop is a self-contained async IIFE that owns its controller.
-  // It exits when:  (a) controller is aborted  (b) error  (c) trigger fires (single-shot)
   const zs_start = useCallback(() => {
-    // Abort any existing loop — it will exit at its next abort-check point
     if (ctrlRef.current) {
       ctrlRef.current.abort();
     }
-    // Create a brand new controller for this run
     const ctrl = new AbortController();
     ctrlRef.current = ctrl;
 
@@ -223,20 +227,18 @@ export default function SpectrumChart({
     setZsError(null);
     setZsState('running');
 
-    // Helper: await a delay that can be cancelled by the abort signal
     function abortableDelay(ms) {
       return new Promise((resolve) => {
         const timer = setTimeout(resolve, ms);
         ctrl.signal.addEventListener('abort', () => {
           clearTimeout(timer);
-          resolve(); // resolve (not reject) — the loop checks signal.aborted after
+          resolve();
         }, { once: true });
       });
     }
 
     (async () => {
       while (true) {
-        // Exit immediately if aborted before starting this iteration
         if (ctrl.signal.aborted) break;
 
         const p = P.current;
@@ -257,9 +259,7 @@ export default function SpectrumChart({
           const res = await fetch(`${BASE}/api/zero_span?${qs}`, { signal: ctrl.signal });
           data = await res.json();
         } catch (err) {
-          // AbortError = zs_stop() was called — exit cleanly, no state update
           if (err.name === 'AbortError') break;
-          // Network/parse error
           if (!ctrl.signal.aborted) {
             setZsError(err.message);
             setZsLoading(false);
@@ -268,7 +268,6 @@ export default function SpectrumChart({
           break;
         }
 
-        // Check abort again after the await
         if (ctrl.signal.aborted) break;
 
         setZsLoading(false);
@@ -287,7 +286,6 @@ export default function SpectrumChart({
             if (ctrl.signal.aborted) break;
             continue;
           }
-          // Edge found — display and stop (single-shot)
           setZsData(data);
           setRevision(r=>r+1);
           ctrlRef.current = null;
@@ -300,12 +298,10 @@ export default function SpectrumChart({
         setRevision(r=>r+1);
         setZsState('running');
 
-        // Inter-frame pause — cancelled immediately if abort() is called
-        await abortableDelay(150);
+        await abortableDelay(1000);
         if (ctrl.signal.aborted) break;
       }
 
-      // Loop has exited — if we still own the controller, clear it
       if (ctrlRef.current === ctrl) {
         ctrlRef.current = null;
       }
@@ -341,16 +337,69 @@ export default function SpectrumChart({
     if (mode === 'freq') fetchFreqSpan();
   }, [positionMs, windowMs, fftSize, dspVersion, avgFrames, normalise, fetchFreqSpan]);
 
-  // ── Re-run 0-span when position changes (if already running) ─────────────
-  // Use zsState (React state) not ctrlRef (which is null between iterations)
+  // ── One-shot fetch for 0-span (used when loop is stopped) ────────────────
+  // This lets the position bar update the plot even when not in FREE RUN.
+  // It does NOT set zsState to 'running' — it's a silent background refresh.
+  const zsFetchingRef = useRef(false);
+  const fetchZeroSpan = useCallback(async () => {
+    const p = P.current;
+    if (!p.activeDatasetId || zsFetchingRef.current) return;
+    zsFetchingRef.current = true;
+    setZsLoading(true);
+    try {
+      const qs = new URLSearchParams({
+        dataset_id:       p.activeDatasetId,
+        center_mhz:       p.centerMhz,
+        position_ms:      p.positionMs,
+        zs_window_ms:     p.zsWindowMs,
+        zs_fft_size:      p.zsFftSize,
+        trigger_mode:     'free',         // one-shot always uses free so we get data immediately
+        trigger_level_db: p.triggerLevelDb,
+        dc_downconvert:   p.dcDownconvert,
+      });
+      const res = await fetch(`${BASE}/api/zero_span?${qs}`);
+      const data = await res.json();
+      if (!data.error) {
+        setZsData(data);
+        setRevision(r => r + 1);
+        setZsError(null);
+      }
+    } catch (e) {
+      // silently ignore — don't disturb stopped state
+    } finally {
+      setZsLoading(false);
+      zsFetchingRef.current = false;
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const zsStateRef = useRef('stopped');
   useEffect(() => { zsStateRef.current = zsState; }, [zsState]);
 
+  // Debounce timer ref — prevents a rapid slider drag from firing
+  // zs_start() or fetchZeroSpan() on every intermediate tick.
+  const zsDebounceRef = useRef(null);
+
+  // ── React to position/window/center changes in 0-span mode ─────────────
+  // Debounced 300ms so dragging the slider doesn't flood the backend.
+  // If the loop is running -> restart it at the new position after settling.
+  // If the loop is stopped -> one-shot fetch so the plot still updates.
+  // centerMhz is included so editing the Center field while stopped also
+  // triggers a refresh without needing to press RUN again.
   useEffect(() => {
-    if (mode === 'zero' && zsStateRef.current !== 'stopped') {
-      zs_start();
-    }
-  }, [positionMs, dspVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (mode !== 'zero') return;
+    if (zsDebounceRef.current) clearTimeout(zsDebounceRef.current);
+    zsDebounceRef.current = setTimeout(() => {
+      zsDebounceRef.current = null;
+      if (zsStateRef.current !== 'stopped') {
+        zs_start();
+      } else {
+        fetchZeroSpan();
+      }
+    }, 300);
+    return () => {
+      if (zsDebounceRef.current) { clearTimeout(zsDebounceRef.current); zsDebounceRef.current = null; }
+    };
+  }, [positionMs, zsWindowMs, centerMhz, dspVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Click freq-span → switch to 0-span ───────────────────────────────────
   const handleFreqClick = useCallback((ev) => {
@@ -464,6 +513,7 @@ export default function SpectrumChart({
           <VSep/>
           <TInput label="Center" unit="MHz" value={centerMhz} min={-500} max={500} step={0.001} width={80}
             onChange={setCenterMhz} onCommit={()=>{ if(isRunning) zs_start(); }}/>
+          {/* FIX: Window input now calls setZsWindowMs which notifies App.jsx */}
           <TInput label="Window" unit="ms" value={zsWindowMs} min={1} max={10000} step={1} width={68}
             onChange={setZsWindowMs} onCommit={()=>{ if(isRunning) zs_start(); }}/>
           <TInput label="FFT" value={zsFftSize} min={64} max={8192} step={64} width={60}
@@ -563,8 +613,8 @@ export default function SpectrumChart({
 
         {mode==='zero' && <>
           {noFileZero && <Center><Msg>NO FILE LOADED</Msg></Center>}
-          {!noFileZero && zsState==='stopped' && !zsData && !zsError && (
-            <Center><Msg c="#3a5070">PRESS ▶ RUN TO START</Msg></Center>
+          {!noFileZero && zsState==='stopped' && !zsData && !zsError && !zsLoading && (
+            <Center><Msg c="#3a5070">PRESS ▶ RUN  · or move the position bar to preview</Msg></Center>
           )}
           {!noFileZero && zsError && (
             <Center><Msg c="#ff4d6d">ERROR: {zsError}</Msg><Retry onClick={zs_start}/></Center>

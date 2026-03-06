@@ -87,6 +87,9 @@ export default function App() {
   const dspRef = useRef();
   const [dspVersion, setDspVersion] = useState(0);
 
+  // ── FIX: lift zsWindowMs up so positionMs clamp uses the correct window ──
+  const [zsWindowMs, setZsWindowMs] = useState(100.0);
+
   const [sections, setSections] = useState({
     global: true, mixer: false, filter: false, input: false,
     output: true, compare: false, spectrogram: false, cfar: false, doa: false
@@ -110,12 +113,39 @@ export default function App() {
   const effFs = (dsp.fs_mhz / dsp.decimation).toFixed(4);
   const currentDuration = fileInfo[currentFile]?.duration_ms || 1000;
   const windowMs = dsp.analysis_window_ms;
-  // Clamp so the analysis window never slides past the end of the file.
-  // Without this, positionMs = currentDuration leaves 0 samples for the FFT.
+
+  // Clamp positionMs to [0, duration]. The backend handles short tail slices
+  // gracefully, so there is no need to subtract the window size here.
+  // Clamping by window size breaks traversal whenever window >= file duration
+  // (e.g. a 30 ms file with a 100 ms 0-span window always gave positionMs=0).
   const positionMs = Math.min(
-    (positionPct / 100) * currentDuration,
-    Math.max(0, currentDuration - windowMs)
+    Math.max(0, (positionPct / 100) * currentDuration),
+    currentDuration
   );
+  // Re-fetch duration/sample-count for all loaded files from the backend.
+  // Must be called after any fs_mhz or decimation change because duration_ms
+  // = total_samples / fs — it changes when fs changes even though the raw
+  // sample count stays the same.
+  const refreshFileInfo = useCallback(async () => {
+    try {
+      const res = await fetch(`${BASE}/api/files`);
+      const list = await res.json();
+      if (!Array.isArray(list)) return;
+      setFileInfo(prev => {
+        const next = { ...prev };
+        list.forEach(f => {
+          if (next[f.dataset_id]) {
+            next[f.dataset_id] = {
+              ...next[f.dataset_id],
+              duration_ms:   f.duration_ms   ?? next[f.dataset_id].duration_ms,
+              total_samples: f.total_samples ?? next[f.dataset_id].total_samples,
+            };
+          }
+        });
+        return next;
+      });
+    } catch (e) { console.error('refreshFileInfo failed:', e); }
+  }, []);
 
   const applyDsp = useCallback(async (overrides = {}) => {
     setApplying(true);
@@ -132,9 +162,11 @@ export default function App() {
           doa_rows: m.doa_rows, doa_cols: m.doa_cols, doa_spacing: m.doa_spacing, doa_mode: m.doa_mode,
         }),
       });
+      // Refresh sidebar duration display — it depends on fs which may have changed
+      await refreshFileInfo();
     } catch (e) { console.error("DSP Apply Failed:", e); }
     finally { setDspVersion(v => v + 1); setTimeout(() => setApplying(false), 500); }
-  }, []);
+  }, [refreshFileInfo]);
 
   const handleClearAll = async () => {
     if (!window.confirm("Clear all datasets?")) return;
@@ -189,7 +221,6 @@ export default function App() {
     [compareMode, JSON.stringify(compareFiles), currentFile]
   );
 
-  // Stable base props — only recomputed when values actually change
   const baseProps = useMemo(() => ({
     activeDatasetId: currentFile,
     positionMs,
@@ -201,12 +232,13 @@ export default function App() {
     fftSize: dsp.fft_size,
   }), [currentFile, positionMs, windowMs, dspVersion, compareMode, activeCompareIds, dsp.fft_size]);
 
-  // ── Render only the active tab's chart component.
-  //    SpectrumChart is kept alive across tab switches by using a
-  //    persistent wrapper div — only its visibility changes, not its
-  //    mount state. All other tabs are unmounted when not active
-  //    (they don't have long-running loops).
-  const spectrumProps = useMemo(() => ({ ...baseProps, onRemoveFile: handleRemoveFile }), [baseProps, handleRemoveFile]);
+  // ── FIX: pass zsWindowMs and its setter into SpectrumChart ───────────────
+  const spectrumProps = useMemo(() => ({
+    ...baseProps,
+    onRemoveFile: handleRemoveFile,
+    zsWindowMs,
+    onZsWindowChange: setZsWindowMs,
+  }), [baseProps, handleRemoveFile, zsWindowMs]);
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#080c18', color: '#c8d8f0', fontFamily: '"Segoe UI",sans-serif', overflow: 'hidden' }}>
@@ -394,12 +426,6 @@ export default function App() {
         )}
 
         <section style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          {/*
-            SpectrumChart is ALWAYS mounted (hidden when not active).
-            It has a long-running fetch loop that must not be torn down
-            by tab switches. All other charts are only mounted when active
-            — they make single fetch calls on demand, not continuous loops.
-          */}
           <div style={{ display: activeTab === 'Spectrum' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
             <SpectrumChart {...spectrumProps} />
           </div>
