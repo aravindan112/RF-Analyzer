@@ -1,16 +1,3 @@
-"""
-Data Manager Module for IQ Visual Analyzer.
-Responsible for dataset management, DSP parameter synchronization,
-and locked signal windowing.
-
-FIXES applied in this version:
-  1. get_time_axis() — was computing start_sample_actual with eff_fs but
-     get_window() already applies the filter margin offset internally.
-     Now simply uses start_ms directly → no t-axis drift.
-  2. update_all_fs() — propagates new Fs to all datasets and clears tap cache.
-  3. get_effective_fs() fallback now returns 10 MHz (saner default).
-  4. _detect_channel_mode variable names clarified (zeros_col0/col1).
-"""
 import numpy as np
 import threading
 from dsp_processing import DSPProcessor

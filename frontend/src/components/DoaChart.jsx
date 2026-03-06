@@ -1,20 +1,3 @@
-/**
- * DoaChart.jsx
- *
- * Real multi-channel DoA view.
- * Supports stacking signals from multiple files for 2D MUSIC (Az/El).
- *
- * FIXES:
- *   1. fetchData: single-file branch was sending 'dataset_id' (singular) but
- *      the backend only accepts 'dataset_ids' (plural, List[str]). This caused
- *      the backend to receive ids=[] and always return the "requires at least
- *      2 channels" error even with compare mode off.
- *   2. MusicSpectrum: was building a full `traces` array (with peak diamond
- *      marker) but then creating a second `trace` variable that overwrote it.
- *      Only the second bare trace was ever rendered — peak marker was lost.
- *      Fixed by removing the duplicate and using the correctly built traces.
- */
-
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
 
@@ -48,10 +31,6 @@ function MusicSpectrum({ data, revision, width, height }) {
 
   const peakY = Math.max(...data.spectrum_db);
 
-  // FIX: was building `traces` correctly here with the peak diamond marker,
-  // then creating a second bare `trace` variable below and passing THAT to
-  // <Plot> instead — so the peak marker was never rendered.
-  // Now we build one `traces` array and use it directly.
   const traces = [
     {
       x: data.angles,

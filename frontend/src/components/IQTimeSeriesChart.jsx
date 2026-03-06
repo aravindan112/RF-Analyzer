@@ -1,13 +1,3 @@
-/**
- * IQTimeSeriesChart.jsx
- *
- * Shows I and Q as TWO separate stacked subplots (via Plotly yaxis2)
- * so the channels are easy to compare side-by-side.
- *  • Row 1 (top)    → I (In-Phase)
- *  • Row 2 (bottom) → Q (Quadrature)
- * Both share the same X axis (time in ms).
- */
-
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
 

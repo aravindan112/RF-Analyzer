@@ -1,16 +1,3 @@
-"""
-Data Loader Module
-Handles loading IQ data from various file formats
-
-Fixes applied:
-  1. _load_hex: comment-line removal now happens BEFORE the str.maketrans
-     translation that strips newlines.
-  2. _load_binary: removed memmap for temp files — os.unlink() after load
-     crashes on Windows if the file is still memory-mapped. Use fromfile always.
-  3. _load_hex single-channel detection: renamed zeros_low/zeros_high to
-     zeros_col0/zeros_col1 — the old names were misleading (they referred to
-     array column index, not byte significance) and could cause future bugs.
-"""
 import numpy as np
 import os
 

@@ -1,25 +1,3 @@
-/**
- * SpectrumChart.jsx
- *
- * LOOP DESIGN
- * ───────────
- * One AbortController per "run". zs_stop() calls abort() which:
- *   1. Cancels the in-flight fetch immediately (AbortError)
- *   2. Fires the 'abort' event on the inter-frame pause promise, resolving it early
- * This means there is exactly ONE code path that exits the loop,
- * and it is synchronous — no race windows.
- *
- * TRAVERSAL DESIGN
- * ────────────────
- * positionMs is clamped only to [0, duration] in App.jsx — NOT by window size.
- * Clamping by window broke traversal when window >= file duration (always gave 0).
- * The backend handles short-tail slices gracefully so no frontend guard is needed.
- *
- * zsWindowMs is a prop lifted to App.jsx. The position-change useEffect is
- * debounced 300ms and fires fetchZeroSpan() (stopped) or zs_start() (running).
- * FREE RUN loop delay is 1000ms to avoid flooding the backend.
- */
-
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
 
@@ -337,9 +315,6 @@ export default function SpectrumChart({
     if (mode === 'freq') fetchFreqSpan();
   }, [positionMs, windowMs, fftSize, dspVersion, avgFrames, normalise, fetchFreqSpan]);
 
-  // ── One-shot fetch for 0-span (used when loop is stopped) ────────────────
-  // This lets the position bar update the plot even when not in FREE RUN.
-  // It does NOT set zsState to 'running' — it's a silent background refresh.
   const zsFetchingRef = useRef(false);
   const fetchZeroSpan = useCallback(async () => {
     const p = P.current;
@@ -379,12 +354,6 @@ export default function SpectrumChart({
   // zs_start() or fetchZeroSpan() on every intermediate tick.
   const zsDebounceRef = useRef(null);
 
-  // ── React to position/window/center changes in 0-span mode ─────────────
-  // Debounced 300ms so dragging the slider doesn't flood the backend.
-  // If the loop is running -> restart it at the new position after settling.
-  // If the loop is stopped -> one-shot fetch so the plot still updates.
-  // centerMhz is included so editing the Center field while stopped also
-  // triggers a refresh without needing to press RUN again.
   useEffect(() => {
     if (mode !== 'zero') return;
     if (zsDebounceRef.current) clearTimeout(zsDebounceRef.current);

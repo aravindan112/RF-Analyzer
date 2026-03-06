@@ -23,10 +23,6 @@ app.add_middleware(
 
 data_manager = DataManager()
 
-# ── Shared PSD helper ──────────────────────────────────────────────────────
-# Used by spectrum, spectrogram, cfar, zero_span — normalisation is
-# always identical so power values are comparable across all views.
-
 def _compute_frame_psd(frame: np.ndarray, fft_size: int, eff_fs: float) -> np.ndarray:
     win      = np.hanning(fft_size)
     win_norm = win / np.sqrt(np.sum(win ** 2))   # RMS-normalise
@@ -110,10 +106,6 @@ def list_files():
     return result
 
 # ── DSP Parameters ─────────────────────────────────────────────────────────
-# IMPORTANT — only GLOBAL parameters live here.
-# Zero-span parameters (zs_fft_size, zs_window_ms, center_mhz, trigger_*)
-# are sent directly to /api/zero_span and are NEVER stored in data_manager.
-# This prevents them from accidentally affecting spectrum/cfar/spectrogram.
 
 class DSPParams(BaseModel):
     fs_mhz:         float = 32.768
@@ -375,9 +367,6 @@ def get_doa(
         return {"error": f"2D Rect Layout ({rows}x{cols}) does not match selected files ({M})."}
 
     fft_size = min(1024, N)
-    # Use fftshift so peak_bin is always correct for both positive and
-    # negative frequency tones (unshifted FFT would place negative-freq
-    # peaks in the upper half, giving the wrong bin for phase comparison).
     ref_fft  = np.fft.fftshift(np.fft.fft(X[0, :fft_size]))
     peak_bin = int(np.argmax(np.abs(ref_fft)))
     freqs_hz = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs))
@@ -423,21 +412,6 @@ def get_doa(
         "phases":         [p["dphi"] for p in pair_info],
     }
 
-# ── Zero Span ──────────────────────────────────────────────────────────────
-# All parameters here are LOCAL — they never touch data_manager and
-# never affect spectrum / cfar / spectrogram / doa.
-#
-# FIX 1: Removed powers_arr -= np.max(powers_arr) normalisation.
-#         Power is now returned as absolute dBFS so the trigger level
-#         threshold works correctly (comparing like-for-like).
-#
-# FIX 2: Effective RBW accounts for 5-bin integration:
-#         rbw_hz = eff_fs / zs_fft_size   (single-bin bandwidth)
-#         Caller multiplies by 5 to display the true noise bandwidth.
-#
-# FIX 3: bin_idx boundary guard prevents negative slice index.
-#
-# FIX 4: Frame loop breaks early if final slice is shorter than zs_fft_size.
 
 @app.get("/api/zero_span")
 def get_zero_span(

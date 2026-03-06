@@ -1,21 +1,3 @@
-/**
- * CfarChart.jsx
- *
- * CFAR detection plot with compare mode support.
- *
- * FIXES:
- *   1. BASE URL changed from hardcoded 'http://localhost:8000' to use
- *      window.location.hostname so it works on non-local deployments.
- *   2. All CFAR params (guardCells, refCells, thresholdDb, cfarFft) are
- *      already in the useCallback dependency array — this was correct.
- *      However the params were being sent as query strings on every fetch,
- *      which means they override data_manager values. This is fine AS LONG
- *      AS App.jsx calls applyDsp() immediately when these change (not just
- *      onBlur). Added a comment flagging this contract so it is not broken.
- *   3. fetchData dependency array now uses compareIds.join(',') instead of
- *      the array reference directly, preventing unnecessary re-fetches.
- */
-
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
 
@@ -63,10 +45,6 @@ export default function CfarChart({
     : (activeDatasetId ? [activeDatasetId] : []);
 
   // ── fetch ────────────────────────────────────────────────────────────────
-  // NOTE: these params are sent as query strings which override data_manager
-  // values on the backend. For this to stay in sync, App.jsx must call
-  // applyDsp({ cfar_guard, cfar_ref, cfar_threshold }) immediately when any
-  // CFAR slider changes (not just onBlur), so backend and frontend agree.
   const fetchData = useCallback(async () => {
     if (fetchingRef.current || targetIds.length === 0) {
       if (targetIds.length === 0) setError('no_file');
@@ -107,8 +85,6 @@ export default function CfarChart({
       setLoading(false);
       fetchingRef.current = false;
     }
-  // FIX: use .join(',') on compareIds so the reference doesn't cause
-  // unnecessary re-fetches on every render
   }, [targetIds.join(','), positionMs, windowMs, dspVersion, cfarFft, guardCells, refCells, thresholdDb]);
 
   useEffect(() => {

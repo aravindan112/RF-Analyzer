@@ -114,18 +114,10 @@ export default function App() {
   const currentDuration = fileInfo[currentFile]?.duration_ms || 1000;
   const windowMs = dsp.analysis_window_ms;
 
-  // Clamp positionMs to [0, duration]. The backend handles short tail slices
-  // gracefully, so there is no need to subtract the window size here.
-  // Clamping by window size breaks traversal whenever window >= file duration
-  // (e.g. a 30 ms file with a 100 ms 0-span window always gave positionMs=0).
   const positionMs = Math.min(
     Math.max(0, (positionPct / 100) * currentDuration),
     currentDuration
   );
-  // Re-fetch duration/sample-count for all loaded files from the backend.
-  // Must be called after any fs_mhz or decimation change because duration_ms
-  // = total_samples / fs — it changes when fs changes even though the raw
-  // sample count stays the same.
   const refreshFileInfo = useCallback(async () => {
     try {
       const res = await fetch(`${BASE}/api/files`);
