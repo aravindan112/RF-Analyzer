@@ -168,7 +168,7 @@ export default function App() {
     } catch (e) { console.error("Clear failed:", e); }
   };
 
-  const uploadFile = async (e) => {
+ const uploadFile = async (e) => {
     const file = e.target.files[0]; if (!file) return;
     setUploading(true); setUploadError(null);
     const fd = new FormData();
@@ -182,6 +182,32 @@ export default function App() {
       const data = await res.json();
       if (data.error) { setUploadError(`Load failed: ${data.error}`); return; }
       if (!data.dataset_id) { setUploadError('Load failed: no dataset_id returned'); return; }
+
+      // ── Multi-channel CSV (e.g. Vivado ILA export) ─────────────────────
+      if (data.multi_channel && Array.isArray(data.channels)) {
+        const newIds = data.channels.map(ch => ch.dataset_id);
+        setFiles(prev => [...prev, ...newIds]);
+        setCurrentFile(newIds[0]);
+        setPositionPct(0);
+        setFileInfo(prev => {
+          const next = { ...prev };
+          data.channels.forEach(ch => {
+            next[ch.dataset_id] = {
+              duration_ms:   ch.duration_ms   || 0,
+              total_samples: ch.total_samples || 0,
+              data_format:   ch.data_format   || '',
+            };
+          });
+          return next;
+        });
+        // Auto-enable compare mode and select all channels
+        setCompareMode(true);
+        setCompareFiles(newIds);
+        await applyDsp();
+        return;
+      }
+
+      // ── Single-channel / binary / hex (original behaviour) ────────────
       const id = data.dataset_id;
       setFiles(prev => [...prev, id]);
       setCurrentFile(id);

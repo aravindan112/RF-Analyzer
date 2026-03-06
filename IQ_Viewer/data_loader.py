@@ -1,3 +1,4 @@
+import csv
 import numpy as np
 import os
 
@@ -48,40 +49,204 @@ class DataLoader:
 
         return 'complex64'
 
-        
+    # ── ILA CSV helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _bin_str_to_int16(s):
+        """Convert 16-bit two's-complement binary string to signed int."""
+        v = int(s.strip(), 2)
+        return v - 65536 if v >= 32768 else v
+
+    @staticmethod
+    def _detect_ila_csv(path):
+        """
+        Returns (is_ila, iq_pairs) where iq_pairs is a list of
+        (i_col_idx, q_col_idx, channel_name) tuples.
+
+        Detection rules:
+          - Second row is a 'radix' row (contains BINARY / SIGNED / UNSIGNED)
+          - Consecutive BINARY column pairs whose names contain I_data / Q_data
+            are treated as IQ channel pairs.
+        """
+        try:
+            with open(path, newline='', encoding='utf-8', errors='ignore') as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                second = next(reader)
+        except Exception:
+            return False, []
+
+        # Must look like a radix row
+        radix_keywords = {'binary', 'signed', 'unsigned', 'hex', 'radix'}
+        radix_hits = sum(1 for r in second if r.strip().lower() in radix_keywords
+                         or 'radix' in r.strip().lower())
+        if radix_hits < 2:
+            return False, []
+
+        radix = [r.strip().upper() for r in second]
+
+        # Accepted radix types for IQ data columns
+        IQ_RADIX = {'BINARY', 'SIGNED', 'UNSIGNED'}
+
+        # Find consecutive IQ-radix pairs whose names contain I_data / Q_data
+        iq_pairs = []
+        i = 0
+        while i < len(header) - 1:
+            h_i = header[i].lower()
+            h_q = header[i + 1].lower()
+            r_i = radix[i]     if i     < len(radix) else ''
+            r_q = radix[i + 1] if i + 1 < len(radix) else ''
+
+            if r_i in IQ_RADIX and r_q in IQ_RADIX:
+                name_i = h_i.split('/')[-1]
+                name_q = h_q.split('/')[-1]
+                is_i = ('_i_' in name_i or name_i.startswith('i_') or
+                        '_i[' in name_i or 'i_data' in name_i)
+                is_q = ('_q_' in name_q or name_q.startswith('q_') or
+                        '_q[' in name_q or 'q_data' in name_q)
+                if is_i and is_q:
+                    ch_name = f'ch{len(iq_pairs) + 1}'
+                    # Store radix type so loader knows how to parse values
+                    iq_pairs.append((i, i + 1, ch_name, r_i))
+                    i += 2
+                    continue
+            i += 1
+
+        return len(iq_pairs) > 0, iq_pairs
+
+    @staticmethod
+    def _load_ila_csv(path, file_size_mb, max_samples, stop_event,
+                      progress_callback, iq_pairs):
+        """
+        Load a Vivado ILA CSV export.
+
+        Returns a LIST of (signal, data_format, channel_mode, raw_hex_data, ch_name)
+        tuples — one per detected IQ channel pair.
+        """
+        if progress_callback:
+            progress_callback(
+                f"Parsing ILA CSV ({file_size_mb:.1f} MB, "
+                f"{len(iq_pairs)} IQ channels)…"
+            )
+
+        rows = []
+        with open(path, newline='', encoding='utf-8', errors='ignore') as f:
+            reader = csv.reader(f)
+            next(reader)  # header
+            next(reader)  # radix
+            for row in reader:
+                if stop_event and stop_event.is_set():
+                    return None
+                rows.append(row)
+
+        if max_samples:
+            rows = rows[:max_samples]
+
+        N = len(rows)
+        results = []
+
+        for (ic, qc, ch_name, radix_type) in iq_pairs:
+            if stop_event and stop_event.is_set():
+                return None
+
+            try:
+                if radix_type == 'BINARY':
+                    # 16-bit two's-complement binary string → signed int
+                    I = np.array(
+                        [DataLoader._bin_str_to_int16(r[ic]) for r in rows],
+                        dtype=np.float32
+                    ) / 32768.0
+                    Q = np.array(
+                        [DataLoader._bin_str_to_int16(r[qc]) for r in rows],
+                        dtype=np.float32
+                    ) / 32768.0
+                else:
+                    # SIGNED or UNSIGNED decimal integer → normalize by 32768
+                    I = np.array(
+                        [int(r[ic]) for r in rows], dtype=np.float32
+                    ) / 32768.0
+                    Q = np.array(
+                        [int(r[qc]) for r in rows], dtype=np.float32
+                    ) / 32768.0
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"Error parsing {ch_name}: {e}")
+                continue
+
+            signal = (I + 1j * Q).astype(np.complex64)
+
+            # Build a short preview (same style as _load_binary)
+            preview = [f"--- ILA CSV {ch_name} preview ({N} samples) ---"]
+            for k in range(min(200, N)):
+                preview.append(
+                    f"{k:06d}: {signal[k].real:+.5f} {signal[k].imag:+.5f}j"
+                )
+
+            data_format = (
+                f"ILA CSV ({ch_name}) – {file_size_mb:.1f} MB"
+                + (f" (partial: {N:,})" if max_samples else "")
+            )
+            results.append((signal, data_format, "dual", preview, ch_name))
+
+        return results if results else None
+
+    # ── Public entry point ─────────────────────────────────────────────────
+
     @staticmethod
     def load_file(path, max_samples=None, stop_event=None, progress_callback=None,
                   channel_mode_var=None, hex_signed=True, scale_factor=1.0,
                   q15_format=False, bin_dtype="auto"):
+
         file_size_mb = os.path.getsize(path) / (1024 * 1024)
         ext = os.path.splitext(path)[1].lower()
+
+        # ── .npy ──────────────────────────────────────────────────────────
         if ext == ".npy":
             signal = np.load(path)
-
-            # Ensure complex type
             if not np.iscomplexobj(signal):
                 signal = signal.astype(np.complex64)
-    
             data_format = f"NumPy (.npy) - {len(signal):,} samples"
-
-            preview_samples = min(500, len(signal))
-            raw_hex_data = ["--- NumPy Preview ---"]
-            for i in range(preview_samples):
+            preview = ["--- NumPy Preview ---"]
+            for i in range(min(500, len(signal))):
                 val = signal[i]
-                raw_hex_data.append(
-                    f"{i:06d}: {val.real:+.6f} {val.imag:+.6f}j"
+                preview.append(f"{i:06d}: {val.real:+.6f} {val.imag:+.6f}j")
+            return signal, data_format, "dual", preview
+
+        # ── CSV / text: check for ILA format first ─────────────────────────
+        if ext in ('.csv', '.txt', '') or not (ext in DataLoader._BINARY_EXTENSIONS):
+            # Sniff binary-ness before deciding
+            try:
+                with open(path, 'rb') as fh:
+                    header_bytes = fh.read(512)
+                non_print = sum(
+                    1 for b in header_bytes
+                    if b < 9 or (13 < b < 32) or b == 127
                 )
+                is_binary_content = non_print > len(header_bytes) * 0.15
+            except Exception:
+                is_binary_content = False
 
-            return signal, data_format, "dual", raw_hex_data
+            if not is_binary_content:
+                # Try ILA CSV detection
+                is_ila, iq_pairs = DataLoader._detect_ila_csv(path)
+                if is_ila:
+                    return DataLoader._load_ila_csv(
+                        path, file_size_mb, max_samples,
+                        stop_event, progress_callback, iq_pairs
+                    )
 
+        # ── Binary / hex / standard text (unchanged original logic) ───────
         is_binary = ext in DataLoader._BINARY_EXTENSIONS
 
         if not is_binary:
             try:
                 with open(path, 'rb') as fh:
-                    header = fh.read(512)
-                non_print = sum(1 for b in header if b < 9 or (13 < b < 32) or b == 127)
-                if non_print > len(header) * 0.15:
+                    header_bytes = fh.read(512)
+                non_print = sum(
+                    1 for b in header_bytes
+                    if b < 9 or (13 < b < 32) or b == 127
+                )
+                if non_print > len(header_bytes) * 0.15:
                     is_binary = True
             except Exception:
                 pass
@@ -118,6 +283,8 @@ class DataLoader:
                 path, file_size_mb, max_samples, stop_event,
                 progress_callback
             )
+
+    # ── Everything below is unchanged from original ────────────────────────
 
     @staticmethod
     def _is_hex_format(line):
@@ -156,7 +323,8 @@ class DataLoader:
             return "dual"
 
     @staticmethod
-    def _load_binary(path, file_size_mb, max_samples, stop_event, progress_callback, bin_dtype):
+    def _load_binary(path, file_size_mb, max_samples, stop_event,
+                     progress_callback, bin_dtype):
         if progress_callback:
             progress_callback(f"Loading binary file ({file_size_mb:.1f} MB)...")
 
@@ -227,7 +395,6 @@ class DataLoader:
             if stop_event and stop_event.is_set():
                 return None, None, None, None
 
-            # Strip comment lines BEFORE the translate that removes newlines
             content_lines = content.splitlines()
             content_lines = [ln for ln in content_lines if not ln.lstrip().startswith('#')]
             content = '\n'.join(content_lines)
@@ -294,7 +461,8 @@ class DataLoader:
             return None, None, None, None
 
     @staticmethod
-    def _load_standard_text(path, file_size_mb, max_samples, stop_event, progress_callback):
+    def _load_standard_text(path, file_size_mb, max_samples, stop_event,
+                            progress_callback):
         if progress_callback:
             progress_callback(f"Loading text file ({file_size_mb:.1f} MB)...")
 

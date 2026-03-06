@@ -25,7 +25,7 @@ data_manager = DataManager()
 
 def _compute_frame_psd(frame: np.ndarray, fft_size: int, eff_fs: float) -> np.ndarray:
     win      = np.hanning(fft_size)
-    win_norm = win / np.sqrt(np.sum(win ** 2))   # RMS-normalise
+    win_norm = win / np.sqrt(np.sum(win ** 2))
     X        = np.fft.fftshift(np.fft.fft(frame * win_norm, n=fft_size))
     psd      = (np.abs(X) ** 2) / eff_fs
     return 10 * np.log10(psd + 1e-20)
@@ -54,7 +54,7 @@ async def load_file(
         tmp_path = tmp.name
 
     try:
-        signal, data_format, mode_detected, raw_hex = DataLoader.load_file(
+        result = DataLoader.load_file(
             tmp_path,
             max_samples=max_samples if max_samples > 0 else None,
             channel_mode_var=channel_mode,
@@ -65,6 +65,55 @@ async def load_file(
         )
     finally:
         os.unlink(tmp_path)
+
+    if result is None:
+        return {"error": "Failed to load file"}
+
+    # ── Multi-channel ILA CSV: returns a list of channel tuples ───────────
+    # Each tuple: (signal, data_format, channel_mode, raw_hex, ch_name)
+    if isinstance(result, list):
+        loaded = []
+        for (signal, data_format, mode_detected, raw_hex, ch_name) in result:
+            if signal is None:
+                continue
+            base_id    = f"{file.filename}:{ch_name}"
+            dataset_id = base_id
+            count = 1
+            while dataset_id in data_manager.datasets:
+                dataset_id = f"{base_id} ({count})"
+                count += 1
+
+            data_manager.set_data(
+                dataset_id, signal, fs_mhz * 1e6,
+                data_format, channel_mode=mode_detected,
+                is_memmap=False, raw_hex_data=raw_hex,
+            )
+            info = data_manager.get_info(dataset_id)
+            loaded.append({
+                "dataset_id":    dataset_id,
+                "channel":       ch_name,
+                "total_samples": info["total_samples"],
+                "duration_ms":   info["duration_ms"],
+                "sampling_freq": info["sampling_freq"],
+                "data_format":   data_format,
+            })
+
+        if not loaded:
+            return {"error": "No channels could be loaded from file"}
+
+        return {
+            "multi_channel": True,
+            "channels":      loaded,
+            # Convenience fields pointing at first channel
+            "dataset_id":    loaded[0]["dataset_id"],
+            "total_samples": loaded[0]["total_samples"],
+            "duration_ms":   loaded[0]["duration_ms"],
+            "sampling_freq": loaded[0]["sampling_freq"],
+            "data_format":   loaded[0]["data_format"],
+        }
+
+    # ── Single-signal path (original behaviour, unchanged) ────────────────
+    signal, data_format, mode_detected, raw_hex = result
 
     if signal is None:
         return {"error": "Failed to load file"}
@@ -178,8 +227,10 @@ def get_spectrum(
     eff_fs     = data_manager.get_effective_fs(dataset_id=dataset_id)
     num_frames = len(data) // fft_size
 
+    # Remove DC offset (mean subtraction) to suppress IQ imbalance spike at 0 Hz
+    data = data - np.mean(data)
+
     if average_frames and num_frames > 1:
-        # Accumulate in linear power then convert — avoids log-domain averaging error
         psd_accum = np.zeros(fft_size)
         for j in range(num_frames):
             frame      = data[j * fft_size:(j + 1) * fft_size]
@@ -194,7 +245,6 @@ def get_spectrum(
     freqs    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     peak_idx = int(np.argmax(power_db))
     noise_db = DSPProcessor.estimate_noise_floor(power_db, peak_idx, fft_size)
-    # Clamp: below -120 dB is the 1e-20 numerical floor, not real noise
     noise_db = max(noise_db, -120.0)
 
     return {
@@ -282,6 +332,9 @@ def get_cfar(
     g        = guard_cells  if guard_cells  is not None else data_manager.cfar_guard
     r        = ref_cells    if ref_cells    is not None else data_manager.cfar_ref
     thr      = threshold_db if threshold_db is not None else data_manager.cfar_threshold
+
+    # Remove DC offset before spectral analysis
+    data = data - np.mean(data)
     power_db = _compute_frame_psd(data[:fft_size], fft_size, eff_fs)
     freqs    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     N        = len(power_db)
@@ -412,6 +465,7 @@ def get_doa(
         "phases":         [p["dphi"] for p in pair_info],
     }
 
+# ── Zero Span ──────────────────────────────────────────────────────────────
 
 @app.get("/api/zero_span")
 def get_zero_span(
@@ -424,7 +478,6 @@ def get_zero_span(
     trigger_level_db: float = -20.0,
     dc_downconvert:   bool  = True,
 ):
-    # ── Sanitise inputs ────────────────────────────────────────────────────
     zs_fft_size = int(np.clip(zs_fft_size, 64, 8192))
 
     data = data_manager.get_window(position_ms, zs_window_ms, dataset_id=dataset_id)
@@ -438,9 +491,6 @@ def get_zero_span(
 
     eff_fs = data_manager.get_effective_fs(dataset_id=dataset_id)
 
-    # ── DC downconvert ─────────────────────────────────────────────────────
-    # Account for any global mixer already applied inside get_window() so we
-    # don't double-shift. Only mix the residual frequency offset.
     lo_already_hz = data_manager.mixer_lo_freq_hz if data_manager.use_mixer else 0.0
     residual_hz   = center_mhz * 1e6 - lo_already_hz
 
@@ -448,7 +498,6 @@ def get_zero_span(
         t    = np.arange(len(data)) / eff_fs
         data = data * np.exp(-1j * 2 * np.pi * residual_hz * t)
 
-    # ── Frame setup ────────────────────────────────────────────────────────
     hop      = zs_fft_size // 2
     n_frames = (len(data) - zs_fft_size) // hop + 1
 
@@ -458,36 +507,29 @@ def get_zero_span(
     win      = np.hanning(zs_fft_size)
     win_norm = win / np.sqrt(np.sum(win ** 2))
 
-    # FIX 3: guard bin_idx against going out of bounds
     freqs = np.fft.fftshift(np.fft.fftfreq(zs_fft_size, d=1.0 / eff_fs))
-    # Original bin in the raw spectrum (what the user actually wants to see)
-    target_freq = center_mhz * 1e6
+    target_freq      = center_mhz * 1e6
     original_bin_idx = int(np.argmin(np.abs(freqs - target_freq)))
 
     if dc_downconvert:
-        bin_idx = zs_fft_size // 2          # signal is at DC after mixing
+        bin_idx = zs_fft_size // 2
     else:
-        bin_idx = original_bin_idx  
+        bin_idx = original_bin_idx
 
-    # Clamp integration window so it never wraps or goes negative
-    half_int   = 2                          # 5-bin window (±2 around centre)
-    bin_lo     = max(0, bin_idx - half_int)
-    bin_hi     = min(zs_fft_size, bin_idx + half_int + 1)
+    half_int = 2
+    bin_lo   = max(0, bin_idx - half_int)
+    bin_hi   = min(zs_fft_size, bin_idx + half_int + 1)
 
-    # ── Per-frame power extraction ─────────────────────────────────────────
     powers_db = []
     times_ms  = []
 
     for i in range(n_frames):
         start = i * hop
         frame = data[start: start + zs_fft_size]
-
-        # FIX 4: skip incomplete final frame
         if len(frame) < zs_fft_size:
             break
-
         X       = np.fft.fftshift(np.fft.fft(frame * win_norm, n=zs_fft_size))
-        band    = X[bin_lo:bin_hi]          # 5-bin integration
+        band    = X[bin_lo:bin_hi]
         ref     = float(np.sum(win_norm) ** 2)
         psd_val = np.sum(np.abs(band) ** 2) / ref
         powers_db.append(float(10 * np.log10(psd_val + 1e-20)))
@@ -497,10 +539,7 @@ def get_zero_span(
         return {"error": "No frames computed. Try increasing Window (ms)."}
 
     powers_arr = np.array(powers_db)
-    # FIX 1: Do NOT normalise — keep absolute dBFS so trigger level is meaningful.
-    # The power values are already in dBFS (0 dBFS = full-scale sine).
 
-    # ── Trigger ────────────────────────────────────────────────────────────
     triggered = True
     if trigger_mode in ("rise", "fall"):
         triggered = False
@@ -529,12 +568,9 @@ def get_zero_span(
                 "center_mhz":  float(center_mhz),
                 "bin_idx":     int(original_bin_idx),
                 "bin_lo":      int(original_bin_idx - 2),
-                "bin_hi":      int(original_bin_idx + 3),   
+                "bin_hi":      int(original_bin_idx + 3),
             }
 
-    # ── Response ───────────────────────────────────────────────────────────
-    # rbw_hz is the single-bin bandwidth; frontend multiplies by 5 to show
-    # the effective noise bandwidth of the 5-bin integration window.
     return {
         "triggered":   triggered,
         "times_ms":    times_ms,
@@ -546,7 +582,7 @@ def get_zero_span(
         "center_mhz":  float(center_mhz),
         "bin_idx":     int(original_bin_idx),
         "bin_lo":      int(original_bin_idx - 2),
-        "bin_hi":      int(original_bin_idx + 3),   
+        "bin_hi":      int(original_bin_idx + 3),
     }
 
 # ── Serve React build ──────────────────────────────────────────────────────
