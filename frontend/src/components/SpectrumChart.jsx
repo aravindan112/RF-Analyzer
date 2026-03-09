@@ -100,6 +100,7 @@ const safeMin = a => a.reduce((m, v) => v < m ? v : m, Infinity);
 export default function SpectrumChart({
   activeDatasetId, positionMs = 0, windowMs = 10, dspVersion = 0, fftSize = 1024,
   compareMode = false, compareIds = [], fileColors = ['#00d4ff', '#ff6b8a', '#5ade9a', '#ffc046'],
+  fileOrder = [],
   onRemoveFile,
   // zsWindowMs is lifted to App.jsx so the position bar clamps correctly
   zsWindowMs: zsWindowMsProp = 100.0,
@@ -120,8 +121,6 @@ export default function SpectrumChart({
   }, [onZsWindowChange]);
 
   const [zsFftSize, setZsFftSize] = useState(512);
-  const [triggerMode, setTriggerMode] = useState('free');
-  const [triggerLevelDb, setTriggerLevelDb] = useState(-20.0);
   const [dcDownconvert, setDcDownconvert] = useState(true);
 
   const [zsData, setZsData] = useState(null);
@@ -139,7 +138,7 @@ export default function SpectrumChart({
   useEffect(() => {
     P.current = {
       activeDatasetId, centerMhz, positionMs, zsWindowMs, zsFftSize,
-      triggerMode, triggerLevelDb, dcDownconvert, dspVersion,
+      dcDownconvert, dspVersion,
       windowMs, fftSize, avgFrames, normalise, compareMode, compareIds,
     };
   });
@@ -232,8 +231,8 @@ export default function SpectrumChart({
             position_ms: p.positionMs,
             zs_window_ms: p.zsWindowMs,
             zs_fft_size: p.zsFftSize,
-            trigger_mode: p.triggerMode,
-            trigger_level_db: p.triggerLevelDb,
+            trigger_mode: 'free',
+            trigger_level_db: -200,
             dc_downconvert: p.dcDownconvert,
           });
           const res = await fetch(`${BASE}/api/zero_span?${qs}`, { signal: ctrl.signal });
@@ -254,21 +253,6 @@ export default function SpectrumChart({
 
         if (data.error) {
           setZsError(data.error);
-          setZsState('stopped');
-          break;
-        }
-
-        // ── Trigger logic ──────────────────────────────────────────────────
-        if (p.triggerMode !== 'free') {
-          if (data.triggered === false) {
-            setZsState('waiting');
-            await abortableDelay(100);
-            if (ctrl.signal.aborted) break;
-            continue;
-          }
-          setZsData(data);
-          setRevision(r => r + 1);
-          ctrlRef.current = null;
           setZsState('stopped');
           break;
         }
@@ -305,12 +289,24 @@ export default function SpectrumChart({
     zs_stop();
   }, [activeDatasetId, zs_stop]);
 
+  // ── Prune stale datasets when targetIds changes (Bug 1 fix) ───────────────
+  const targetIds = compareMode && compareIds.length > 0 ? compareIds : (activeDatasetId ? [activeDatasetId] : []);
+  useEffect(() => {
+    setDatasets(prev => {
+      const validKeys = new Set(targetIds);
+      const pruned = {};
+      for (const k of Object.keys(prev)) {
+        if (validKeys.has(k)) pruned[k] = prev[k];
+      }
+      return Object.keys(pruned).length === Object.keys(prev).length ? prev : pruned;
+    });
+    if (!activeDatasetId) { setZsData(null); setZsError(null); }
+  }, [targetIds.join(','), activeDatasetId]);
+
   // ── Freq-span polling ─────────────────────────────────────────────────────
   useEffect(() => {
     if (mode !== 'freq') return;
     fetchFreqSpan();
-    const id = setInterval(fetchFreqSpan, 5000);
-    return () => clearInterval(id);
   }, [mode, activeDatasetId, fetchFreqSpan]);
 
   useEffect(() => {
@@ -330,8 +326,8 @@ export default function SpectrumChart({
         position_ms: p.positionMs,
         zs_window_ms: p.zsWindowMs,
         zs_fft_size: p.zsFftSize,
-        trigger_mode: 'free',         // one-shot always uses free so we get data immediately
-        trigger_level_db: p.triggerLevelDb,
+        trigger_mode: 'free',
+        trigger_level_db: -200,
         dc_downconvert: p.dcDownconvert,
       });
       const res = await fetch(`${BASE}/api/zero_span?${qs}`);
@@ -390,12 +386,11 @@ export default function SpectrumChart({
   const zsDynRange = zsPeakPwr != null && zsMinPwr != null ? zsPeakPwr - zsMinPwr : null;
 
   // ── Freq-span traces ──────────────────────────────────────────────────────
-  const targetIds = compareMode && compareIds.length > 0 ? compareIds : (activeDatasetId ? [activeDatasetId] : []);
   const primary = Object.values(datasets).reduce((best, d) =>
     (!best || (d.peak_db ?? -Infinity) > (best.peak_db ?? -Infinity)) ? d : best
-  , null) ?? datasets[activeDatasetId];
+    , null) ?? datasets[activeDatasetId];
   const fsTraces = Object.entries(datasets).flatMap(([id, d], idx) => {
-    const ci = compareIds.indexOf(id), color = fileColors[(ci >= 0 ? ci : idx) % fileColors.length], isMain = id === activeDatasetId;
+    const fi = fileOrder.indexOf(id), color = fileColors[(fi >= 0 ? fi : idx) % fileColors.length], isMain = id === activeDatasetId;
     const isPrimary = primary && d.peak_db === primary.peak_db && d.peak_mhz === primary.peak_mhz;
     const out = [{
       x: d.freqs, y: d.power_db, type: 'scatter', mode: 'lines',
@@ -456,8 +451,6 @@ export default function SpectrumChart({
     xaxis: { title: { text: `Time (ms)  ·  center ${centerMhz.toFixed(4)} MHz  ·  eff RBW ${rbwDisplay}`, font: { color: '#5a6a8a', size: 11 } }, color: '#3a4a6a', gridcolor: '#141c2e', tickfont: { color: '#5a7090', size: 10 }, zeroline: false },
     yaxis: { title: { text: 'Power (dBFS)', font: { color: '#5a6a8a', size: 11 } }, color: '#3a4a6a', gridcolor: '#141c2e', tickfont: { color: '#5a7090', size: 10 } },
     showlegend: false,
-    shapes: [{ type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: triggerLevelDb, y1: triggerLevelDb, line: { color: 'rgba(255,77,109,0.55)', width: 1.5, dash: 'dash' } }],
-    annotations: triggerMode !== 'free' ? [{ xref: 'paper', yref: 'y', x: 0.99, y: triggerLevelDb, text: `Trig ${triggerLevelDb.toFixed(1)} dB`, showarrow: false, xanchor: 'right', font: { color: '#ff4d6d', size: 9, family: 'monospace' }, yshift: 8 }] : []
   };
 
   // ── Derived UI state ──────────────────────────────────────────────────────
@@ -466,7 +459,6 @@ export default function SpectrumChart({
   const fsHasData = fsTraces.length > 0;
   const zsHasData = zsTraces.length > 0;
   const isRunning = zsState !== 'stopped';
-  const isWaiting = zsState === 'waiting';
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -506,28 +498,12 @@ export default function SpectrumChart({
             onChange={v => setZsFftSize(Math.max(64, Math.round(v / 64) * 64))}
             onCommit={() => { if (isRunning) zs_start(); }} />
           <VSep />
-          <TSelect label="Trigger" value={triggerMode} width={120}
-            onChange={v => { setTriggerMode(v); if (isRunning) setTimeout(zs_start, 0); }}
-            options={[
-              { value: 'free', label: 'FREE RUN' },
-              { value: 'rise', label: 'RISING EDGE' },
-              { value: 'fall', label: 'FALLING EDGE' },
-            ]} />
-          {triggerMode !== 'free' && (
-            <TInput label="Level" unit="dBFS" value={triggerLevelDb} min={-200} max={50} step={1} width={60}
-              onChange={setTriggerLevelDb} onCommit={() => { if (isRunning) zs_start(); }} />
-          )}
-          <VSep />
           <TCheck label="DC Downconv" checked={dcDownconvert}
             onChange={() => { setDcDownconvert(v => !v); if (isRunning) setTimeout(zs_start, 0); }} />
           <VSep />
 
           {/* Status badge */}
-          {isWaiting ? (
-            <div style={{ padding: '3px 10px', borderRadius: 3, fontSize: 9, ...mono, fontWeight: 700, background: 'rgba(255,193,70,0.12)', color: '#ffc046', border: '1px solid rgba(255,193,70,0.4)', flexShrink: 0 }}>
-              ⏳ WAITING {triggerMode === 'rise' ? 'RISE' : 'FALL'}
-            </div>
-          ) : isRunning ? (
+          {isRunning ? (
             <div style={{ padding: '3px 10px', borderRadius: 3, fontSize: 9, ...mono, fontWeight: 700, background: 'rgba(90,222,154,0.1)', color: '#5ade9a', border: '1px solid rgba(90,222,154,0.35)', flexShrink: 0 }}>
               ● RUNNING
             </div>
@@ -610,19 +586,6 @@ export default function SpectrumChart({
             <Center><Msg c="#ff4d6d">ERROR: {zsError}</Msg><Retry onClick={zs_start} /></Center>
           )}
           {zsLoading && !zsHasData && !zsError && <Spin />}
-          {isWaiting && (
-            <Center>
-              <div style={{ fontSize: 12, color: '#ffc046', ...mono, letterSpacing: '0.1em' }}>⏳ WAITING FOR TRIGGER</div>
-              <div style={{ fontSize: 10, color: '#4a5a7a', ...mono, marginTop: 4 }}>
-                {triggerMode === 'rise' ? 'Rising' : 'Falling'} edge · threshold {triggerLevelDb} dBFS
-              </div>
-              <div style={{ fontSize: 9, color: '#3a4060', ...mono, marginTop: 2 }}>Scanning… click STOP to cancel</div>
-              <button onClick={() => { setTriggerMode('free'); setTimeout(zs_start, 0); }}
-                style={{ marginTop: 12, padding: '5px 14px', background: 'transparent', border: '1px solid #ffc046', color: '#ffc046', cursor: 'pointer', fontSize: 10, ...mono, borderRadius: 3 }}>
-                SWITCH TO FREE RUN
-              </button>
-            </Center>
-          )}
           {zsHasData && (
             <Plot data={zsTraces} layout={zsLayout} revision={revision}
               config={{ displayModeBar: true, displaylogo: false, responsive: false, scrollZoom: true }}

@@ -11,6 +11,7 @@ export default function IQTimeSeriesChart({
   compareMode = false,
   compareIds = [],
   fileColors = ['#00d4ff', '#ff6b8a', '#5ade9a', '#ffc046'],
+  fileOrder = [],
 }) {
   const [datasets, setDatasets] = useState({});
   const [error, setError] = useState(null);
@@ -18,7 +19,7 @@ export default function IQTimeSeriesChart({
   const [revision, setRevision] = useState(0);
   const [dims, setDims] = useState({ width: 800, height: 500 });
   const containerRef = useRef(null);
-  const pollRef = useRef(null);
+
   const fetchingRef = useRef(false);
 
   // ── container-size tracking ─────────────────────────────────────────────────
@@ -65,10 +66,17 @@ export default function IQTimeSeriesChart({
 
   useEffect(() => {
     fetchData();
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(fetchData, 3000);
-    return () => clearInterval(pollRef.current);
   }, [fetchData]);
+
+  // Prune stale datasets when targetIds changes
+  useEffect(() => {
+    setDatasets(prev => {
+      const valid = new Set(targetIds);
+      const pruned = {};
+      for (const k of Object.keys(prev)) { if (valid.has(k)) pruned[k] = prev[k]; }
+      return Object.keys(pruned).length === Object.keys(prev).length ? prev : pruned;
+    });
+  }, [targetIds.join(',')]);
 
   // ── Build split I / Q traces ─────────────────────────────────────────────────
   const iTraces = [];
@@ -76,8 +84,8 @@ export default function IQTimeSeriesChart({
   const multi = Object.keys(datasets).length > 1;
 
   Object.entries(datasets).forEach(([id, d], idx) => {
-    const globalIdx = compareIds.indexOf(id);
-    const colorIdx = globalIdx >= 0 ? globalIdx : idx;
+    const fi = fileOrder.indexOf(id);
+    const colorIdx = fi >= 0 ? fi : idx;
     const iColor = fileColors[colorIdx % fileColors.length];
     const qColor = adjustAlpha(iColor, 0.75);
     const shortId = id.length > 16 ? id.slice(0, 14) + '…' : id;

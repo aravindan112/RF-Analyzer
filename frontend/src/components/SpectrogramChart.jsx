@@ -11,6 +11,7 @@ export default function SpectrogramChart({
   compareMode = false,
   compareIds = [],
   fileColors = ['#00d4ff', '#ff6b8a', '#5ade9a', '#ffc046'],
+  fileOrder = [],
 }) {
   const [datasets, setDatasets] = useState({});
   const [error, setError] = useState(null);
@@ -18,7 +19,7 @@ export default function SpectrogramChart({
   const [dims, setDims] = useState({ width: 800, height: 420 });
   const [revision, setRevision] = useState(0);
   const containerRef = useRef(null);
-  const pollRef = useRef(null);
+
   const fetchingRef = useRef(false);
 
   useEffect(() => {
@@ -67,10 +68,17 @@ export default function SpectrogramChart({
 
   useEffect(() => {
     fetchData();
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(fetchData, 4000);
-    return () => clearInterval(pollRef.current);
   }, [fetchData]);
+
+  // Prune stale datasets when targetIds changes
+  useEffect(() => {
+    setDatasets(prev => {
+      const valid = new Set(targetIds);
+      const pruned = {};
+      for (const k of Object.keys(prev)) { if (valid.has(k)) pruned[k] = prev[k]; }
+      return Object.keys(pruned).length === Object.keys(prev).length ? prev : pruned;
+    });
+  }, [targetIds.join(',')]);
 
   const multi = targetIds.length > 1;
   const plotData = [];
@@ -128,11 +136,12 @@ export default function SpectrogramChart({
     };
 
     if (multi) {
+      const fi = fileOrder.indexOf(id);
       layout.annotations.push({
         xref: 'paper', yref: 'paper',
         x: 0, y: top, xanchor: 'left', yanchor: 'bottom',
         text: `<b>${id}</b>`, showarrow: false,
-        font: { color: fileColors[idx % fileColors.length], size: 10, family: 'monospace' }
+        font: { color: fileColors[(fi >= 0 ? fi : idx) % fileColors.length], size: 10, family: 'monospace' }
       });
     }
   });

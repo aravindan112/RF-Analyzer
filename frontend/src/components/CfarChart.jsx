@@ -16,15 +16,16 @@ export default function CfarChart({
   compareMode = false,
   compareIds = [],
   fileColors = ['#00d4ff', '#ff6b8a', '#5ade9a', '#ffc046'],
+  fileOrder = [],
 }) {
-  const [datasets, setDatasets]   = useState({});
-  const [error, setError]         = useState(null);
-  const [loading, setLoading]     = useState(false);
-  const [dims, setDims]           = useState({ width: 800, height: 400 });
-  const [revision, setRevision]   = useState(0);
-  const containerRef  = useRef(null);
-  const pollRef       = useRef(null);
-  const fetchingRef   = useRef(false);
+  const [datasets, setDatasets] = useState({});
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [dims, setDims] = useState({ width: 800, height: 400 });
+  const [revision, setRevision] = useState(0);
+  const containerRef = useRef(null);
+
+  const fetchingRef = useRef(false);
 
   // ── resize observer ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -32,7 +33,7 @@ export default function CfarChart({
     const ro = new ResizeObserver(([e]) => {
       const { width, height } = e.contentRect;
       setDims({
-        width:  Math.floor(width  - 2),
+        width: Math.floor(width - 2),
         height: Math.floor(Math.max(height - 52, 260)),
       });
     });
@@ -56,12 +57,12 @@ export default function CfarChart({
       const results = await Promise.all(
         targetIds.map(id => {
           const p = new URLSearchParams({
-            dataset_id:   id,
-            position_ms:  positionMs,
-            window_ms:    windowMs,
-            fft_size:     cfarFft,
-            guard_cells:  guardCells,
-            ref_cells:    refCells,
+            dataset_id: id,
+            position_ms: positionMs,
+            window_ms: windowMs,
+            fft_size: cfarFft,
+            guard_cells: guardCells,
+            ref_cells: refCells,
             threshold_db: thresholdDb,
           });
           return fetch(`${BASE}/api/cfar?${p}`)
@@ -89,10 +90,17 @@ export default function CfarChart({
 
   useEffect(() => {
     fetchData();
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(fetchData, 3000);
-    return () => clearInterval(pollRef.current);
   }, [fetchData]);
+
+  // Prune stale datasets when targetIds changes
+  useEffect(() => {
+    setDatasets(prev => {
+      const valid = new Set(targetIds);
+      const pruned = {};
+      for (const k of Object.keys(prev)) { if (valid.has(k)) pruned[k] = prev[k]; }
+      return Object.keys(pruned).length === Object.keys(prev).length ? prev : pruned;
+    });
+  }, [targetIds.join(',')]);
 
   // ── build traces ─────────────────────────────────────────────────────────
   const traces = [];
@@ -102,7 +110,8 @@ export default function CfarChart({
     const d = datasets[id];
     if (!d?.freqs?.length) return;
 
-    const color  = fileColors[idx % fileColors.length];
+    const fi = fileOrder.indexOf(id);
+    const color = fileColors[(fi >= 0 ? fi : idx) % fileColors.length];
     const isMain = id === activeDatasetId;
     totalDetections += d.num_detections || 0;
 
@@ -155,9 +164,9 @@ export default function CfarChart({
   const layout = {
     uirevision: targetIds.join(','),
     paper_bgcolor: '#0a0e1a',
-    plot_bgcolor:  '#080c18',
+    plot_bgcolor: '#080c18',
     margin: { l: 58, r: 24, t: 14, b: 48 },
-    width:  dims.width,
+    width: dims.width,
     height: dims.height,
     xaxis: {
       title: { text: 'Frequency (MHz)', font: { color: '#5a6a8a', size: 11 } },
@@ -179,7 +188,7 @@ export default function CfarChart({
     modebar: { bgcolor: 'transparent', color: '#3a5070', activecolor: '#00d4ff' },
   };
 
-  const noFile   = targetIds.length === 0 || error === 'no_file';
+  const noFile = targetIds.length === 0 || error === 'no_file';
   const hasChart = traces.length > 0;
 
   return (
@@ -214,7 +223,7 @@ export default function CfarChart({
 
       {/* ── chart ─────────────────────────────────────────────────────── */}
       <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-        {noFile    && <Center><Msg>NO FILE LOADED</Msg></Center>}
+        {noFile && <Center><Msg>NO FILE LOADED</Msg></Center>}
         {!noFile && error && (
           <Center>
             <Msg c="#ff4d6d">ERROR: {error}</Msg>

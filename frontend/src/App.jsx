@@ -129,7 +129,7 @@ export default function App() {
           if (next[f.dataset_id]) {
             next[f.dataset_id] = {
               ...next[f.dataset_id],
-              duration_ms:   f.duration_ms   ?? next[f.dataset_id].duration_ms,
+              duration_ms: f.duration_ms ?? next[f.dataset_id].duration_ms,
               total_samples: f.total_samples ?? next[f.dataset_id].total_samples,
             };
           }
@@ -168,7 +168,7 @@ export default function App() {
     } catch (e) { console.error("Clear failed:", e); }
   };
 
- const uploadFile = async (e) => {
+  const uploadFile = async (e) => {
     const file = e.target.files[0]; if (!file) return;
     setUploading(true); setUploadError(null);
     const fd = new FormData();
@@ -193,9 +193,9 @@ export default function App() {
           const next = { ...prev };
           data.channels.forEach(ch => {
             next[ch.dataset_id] = {
-              duration_ms:   ch.duration_ms   || 0,
+              duration_ms: ch.duration_ms || 0,
               total_samples: ch.total_samples || 0,
-              data_format:   ch.data_format   || '',
+              data_format: ch.data_format || '',
             };
           });
           return next;
@@ -247,8 +247,9 @@ export default function App() {
     compareMode,
     compareIds: activeCompareIds,
     fileColors: FILE_COLORS,
+    fileOrder: files,
     fftSize: dsp.fft_size,
-  }), [currentFile, positionMs, windowMs, dspVersion, compareMode, activeCompareIds, dsp.fft_size]);
+  }), [currentFile, positionMs, windowMs, dspVersion, compareMode, activeCompareIds, files, dsp.fft_size]);
 
   // ── FIX: pass zsWindowMs and its setter into SpectrumChart ───────────────
   const spectrumProps = useMemo(() => ({

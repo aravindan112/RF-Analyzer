@@ -15,6 +15,7 @@ export default function ConstellationChart({
   compareMode = false,
   compareIds = [],
   fileColors = ['#00d4ff', '#ff6b8a', '#5ade9a', '#ffc046'],
+  fileOrder = [],
 }) {
   const [datasets, setDatasets] = useState({});
   const [error, setError] = useState(null);
@@ -23,7 +24,7 @@ export default function ConstellationChart({
   const [dims, setDims] = useState({ width: 600, height: 500 });
   const [center, setCenter] = useState(false);
   const containerRef = useRef(null);
-  const pollRef = useRef(null);
+
   const fetchingRef = useRef(false);
 
   useEffect(() => {
@@ -67,14 +68,21 @@ export default function ConstellationChart({
 
   useEffect(() => {
     fetchData();
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(fetchData, 3000);
-    return () => clearInterval(pollRef.current);
   }, [fetchData]);
 
+  // Prune stale datasets when targetIds changes
+  useEffect(() => {
+    setDatasets(prev => {
+      const valid = new Set(targetIds);
+      const pruned = {};
+      for (const k of Object.keys(prev)) { if (valid.has(k)) pruned[k] = prev[k]; }
+      return Object.keys(pruned).length === Object.keys(prev).length ? prev : pruned;
+    });
+  }, [targetIds.join(',')]);
+
   const traces = Object.entries(datasets).map(([id, d], idx) => {
-    const globalIdx = compareIds.indexOf(id);
-    const colorIdx = globalIdx >= 0 ? globalIdx : idx;
+    const fi = fileOrder.indexOf(id);
+    const colorIdx = fi >= 0 ? fi : idx;
     const color = fileColors[colorIdx % fileColors.length];
     const shortId = id.length > 16 ? id.slice(0, 14) + '…' : id;
     return {
