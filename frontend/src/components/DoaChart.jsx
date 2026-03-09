@@ -25,106 +25,6 @@ function formatMetrics(data) {
   return { az, el, pairs, meanAngle: az, stdAngle: 0, peakMhz };
 }
 
-// ── Sub-component: MUSIC spectrum ─────────────────────────────────────────
-function MusicSpectrum({ data, revision, width, height }) {
-  if (!data?.angles?.length) return null;
-
-  const peakY = Math.max(...data.spectrum_db);
-
-  const traces = [
-    {
-      x: data.angles,
-      y: data.spectrum_db,
-      type: 'scatter',
-      mode: 'lines',
-      name: 'Beamformer',
-      line: { color: '#00d4ff', width: 2 },
-      fill: 'tozeroy',
-      fillcolor: 'rgba(0,212,255,0.06)',
-      hovertemplate: '%{x:.1f}° | %{y:.1f} dB<extra></extra>',
-    },
-    ...(data.peak_angle_deg != null ? [{
-      x: [data.peak_angle_deg],
-      y: [peakY],
-      type: 'scatter',
-      mode: 'markers+text',
-      marker: {
-        color: '#ff4d6d',
-        size: 10,
-        symbol: 'diamond',
-        line: { color: '#fff', width: 1 },
-      },
-      text: [`  ${data.peak_angle_deg.toFixed(1)}°`],
-      textposition: 'top right',
-      textfont: { color: '#ff4d6d', size: 11, family: 'monospace' },
-      showlegend: false,
-      hovertemplate: '<b>PEAK</b> %{x:.1f}°<extra></extra>',
-      name: 'Peak',
-    }] : []),
-  ];
-
-  const layout = {
-    paper_bgcolor: '#0a0e1a',
-    plot_bgcolor: '#080c18',
-    margin: { t: 30, b: 35, l: 35, r: 15 },
-    width,
-    height,
-    xaxis: {
-      title: { text: 'Angle (°)', font: { size: 10, color: '#3a4a6a' } },
-      range: [-90, 90],
-      tickfont: { size: 10, color: '#3a4a6a' },
-      gridcolor: '#141c2e',
-      zeroline: false,
-    },
-    yaxis: {
-      title: { text: 'dB', font: { size: 10, color: '#3a4a6a' } },
-      tickfont: { size: 10, color: '#3a4a6a' },
-      gridcolor: '#141c2e',
-    },
-    showlegend: true,
-    legend: {
-      x: 1, y: 1, xanchor: 'right',
-      font: { size: 9, color: '#5a6a8a' },
-      bgcolor: 'rgba(0,0,0,0)',
-    },
-  };
-
-  return (
-    <div style={{ position: 'relative', width, height }}>
-      <div style={{
-        position: 'absolute', top: 10, left: '50%',
-        transform: 'translateX(-50%)',
-        fontSize: 10, color: '#3a4a6a', fontFamily: 'monospace', zIndex: 1,
-      }}>
-        Beamformer Pseudo-Spectrum
-      </div>
-      {/* FIX: use `traces` (with peak marker) instead of bare `trace` */}
-      <Plot
-        data={traces}
-        layout={layout}
-        config={{ displayModeBar: false }}
-        style={{ width, height }}
-      />
-      {data.peak_angle_deg != null && (
-        <div style={{
-          position: 'absolute',
-          top: 35,
-          left: `${((data.peak_angle_deg + 90) / 180) * (width - 50) + 35}px`,
-          transform: 'translateX(-50%)',
-          background: '#ff4d6d',
-          color: 'white',
-          padding: '2px 5px',
-          borderRadius: 3,
-          fontSize: 9,
-          pointerEvents: 'none',
-        }}>
-          {data.peak_angle_deg.toFixed(1)}°
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Sub-component: polar needle ───────────────────────────────────────────
 function PolarNeedle({ title, angleDeg, color, width, height }) {
   const ang = angleDeg ?? 0;
@@ -370,13 +270,13 @@ export default function DoaChart({
   compareMode = false,
   compareIds = [],
 }) {
-  const [data, setData]       = useState(null);
-  const [error, setError]     = useState(null);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [dims, setDims]       = useState({ w: 900, h: 600 });
+  const [dims, setDims] = useState({ w: 900, h: 600 });
   const containerRef = useRef(null);
-  const pollRef      = useRef(null);
+  const pollRef = useRef(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -438,16 +338,15 @@ export default function DoaChart({
     return () => clearInterval(pollRef.current);
   }, [fetchData]);
 
-  const derived  = formatMetrics(data);
-  const noFile   = !activeDatasetId && (!compareMode || compareIds.length === 0);
-  const missing  = error === 'endpoint_missing';
-  const hasData  = !!data?.angles?.length;
+  const derived = formatMetrics(data);
+  const noFile = !activeDatasetId && (!compareMode || compareIds.length === 0);
+  const missing = error === 'endpoint_missing';
+  const hasData = !!data?.angles?.length;
 
-  const W      = dims.w;
-  const specH  = Math.max(180, Math.floor(dims.h * 0.30));
-  const polarH = Math.max(180, Math.floor(dims.h * 0.28));
-  const phaseH = Math.max(160, Math.floor(dims.h * 0.26));
-  const halfW  = Math.floor(W / 2) - 4;
+  const W = dims.w;
+  const polarH = Math.max(220, Math.floor(dims.h * 0.42));
+  const phaseH = Math.max(200, Math.floor(dims.h * 0.36));
+  const halfW = Math.floor(W / 2) - 4;
 
   return (
     <div
@@ -516,16 +415,6 @@ export default function DoaChart({
 
         {hasData && derived && (
           <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-
-            {/* Beamformer spectrum */}
-            <div style={{ height: specH, background: '#090d1a', border: '1px solid #141c2e', borderRadius: 4, overflow: 'hidden' }}>
-              <MusicSpectrum
-                data={data}
-                revision={revision}
-                width={W - 16}
-                height={specH}
-              />
-            </div>
 
             {/* Azimuth + Elevation polar needles */}
             <div style={{ display: 'flex', gap: 8 }}>
