@@ -24,50 +24,23 @@ class DataLoader:
         '.u8':   'uint8',      '.doa':  'complex64',
     }
 
+class _CSVParser:
     @staticmethod
-    def _auto_detect_dtype(path):
-        ext = os.path.splitext(path)[1].lower()
-        if ext in DataLoader._EXT_DTYPE:
-            return DataLoader._EXT_DTYPE[ext]
-
-        file_bytes = os.path.getsize(path)
-        for dtype_str, itemsize, min_count in [
-            ('complex64', 8, 8),
-            ('int16',     2, 16),
-            ('int8',      1, 32),
-        ]:
-            if file_bytes < itemsize * min_count:
-                continue
-            try:
-                probe = np.fromfile(path, dtype=dtype_str, count=64)
-                if len(probe) < min_count:
-                    continue
-                if np.all(np.isfinite(probe.view(np.float32 if dtype_str == 'complex64' else dtype_str))):
-                    return dtype_str
-            except Exception:
-                continue
-
-        return 'complex64'
-
-    # ── ILA CSV helpers ────────────────────────────────────────────────────
+    def is_number(s):
+        if not s:
+            return False
+        s = s.strip()
+        if not s:
+            return False
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
-    def _bin_str_to_int16(s):
-        """Convert 16-bit two's-complement binary string to signed int."""
-        v = int(s.strip(), 2)
-        return v - 65536 if v >= 32768 else v
-
-    @staticmethod
-    def _detect_ila_csv(path):
-        """
-        Returns (is_ila, iq_pairs) where iq_pairs is a list of
-        (i_col_idx, q_col_idx, channel_name) tuples.
-
-        Detection rules:
-          - Second row is a 'radix' row (contains BINARY / SIGNED / UNSIGNED)
-          - Consecutive BINARY column pairs whose names contain I_data / Q_data
-            are treated as IQ channel pairs.
-        """
+    def detect_ila_csv(path):
+        import csv
         try:
             with open(path, newline='', encoding='utf-8', errors='ignore') as f:
                 reader = csv.reader(f)
@@ -76,19 +49,14 @@ class DataLoader:
         except Exception:
             return False, []
 
-        # Must look like a radix row
         radix_keywords = {'binary', 'signed', 'unsigned', 'hex', 'radix'}
-        radix_hits = sum(1 for r in second if r.strip().lower() in radix_keywords
-                         or 'radix' in r.strip().lower())
+        radix_hits = sum(1 for r in second if r.strip().lower() in radix_keywords or 'radix' in r.strip().lower())
         if radix_hits < 2:
             return False, []
 
         radix = [r.strip().upper() for r in second]
-
-        # Accepted radix types for IQ data columns
         IQ_RADIX = {'BINARY', 'SIGNED', 'UNSIGNED'}
 
-        # Find consecutive IQ-radix pairs whose names contain I_data / Q_data
         iq_pairs = []
         i = 0
         while i < len(header) - 1:
@@ -100,13 +68,10 @@ class DataLoader:
             if r_i in IQ_RADIX and r_q in IQ_RADIX:
                 name_i = h_i.split('/')[-1]
                 name_q = h_q.split('/')[-1]
-                is_i = ('_i_' in name_i or name_i.startswith('i_') or
-                        '_i[' in name_i or 'i_data' in name_i)
-                is_q = ('_q_' in name_q or name_q.startswith('q_') or
-                        '_q[' in name_q or 'q_data' in name_q)
+                is_i = ('_i_' in name_i or name_i.startswith('i_') or '_i[' in name_i or 'i_data' in name_i)
+                is_q = ('_q_' in name_q or name_q.startswith('q_') or '_q[' in name_q or 'q_data' in name_q)
                 if is_i and is_q:
                     ch_name = f'ch{len(iq_pairs) + 1}'
-                    # Store radix type so loader knows how to parse values
                     iq_pairs.append((i, i + 1, ch_name, r_i))
                     i += 2
                     continue
@@ -115,19 +80,11 @@ class DataLoader:
         return len(iq_pairs) > 0, iq_pairs
 
     @staticmethod
-    def _load_ila_csv(path, file_size_mb, max_samples, stop_event,
-                      progress_callback, iq_pairs):
-        """
-        Load a Vivado ILA CSV export.
-
-        Returns a LIST of (signal, data_format, channel_mode, raw_hex_data, ch_name)
-        tuples — one per detected IQ channel pair.
-        """
+    def load_ila_csv(path, file_size_mb, max_samples, stop_event, progress_callback, iq_pairs):
+        import csv
+        import numpy as np
         if progress_callback:
-            progress_callback(
-                f"Parsing ILA CSV ({file_size_mb:.1f} MB, "
-                f"{len(iq_pairs)} IQ channels)…"
-            )
+            progress_callback(f"Parsing ILA CSV ({file_size_mb:.1f} MB, {len(iq_pairs)} IQ channels)…")
 
         rows = []
         with open(path, newline='', encoding='utf-8', errors='ignore') as f:
@@ -151,23 +108,11 @@ class DataLoader:
 
             try:
                 if radix_type == 'BINARY':
-                    # 16-bit two's-complement binary string → signed int
-                    I = np.array(
-                        [DataLoader._bin_str_to_int16(r[ic]) for r in rows],
-                        dtype=np.float32
-                    ) / 32768.0
-                    Q = np.array(
-                        [DataLoader._bin_str_to_int16(r[qc]) for r in rows],
-                        dtype=np.float32
-                    ) / 32768.0
+                    I = np.array([_BinaryParser.bin_str_to_int16(r[ic]) for r in rows], dtype=np.float32) / 32768.0
+                    Q = np.array([_BinaryParser.bin_str_to_int16(r[qc]) for r in rows], dtype=np.float32) / 32768.0
                 else:
-                    # SIGNED or UNSIGNED decimal integer → normalize by 32768
-                    I = np.array(
-                        [int(r[ic]) for r in rows], dtype=np.float32
-                    ) / 32768.0
-                    Q = np.array(
-                        [int(r[qc]) for r in rows], dtype=np.float32
-                    ) / 32768.0
+                    I = np.array([int(r[ic]) for r in rows], dtype=np.float32) / 32768.0
+                    Q = np.array([int(r[qc]) for r in rows], dtype=np.float32) / 32768.0
             except Exception as e:
                 if progress_callback:
                     progress_callback(f"Error parsing {ch_name}: {e}")
@@ -175,27 +120,503 @@ class DataLoader:
 
             signal = (I + 1j * Q).astype(np.complex64)
 
-            # Build a short preview (same style as _load_binary)
             preview = [f"--- ILA CSV {ch_name} preview ({N} samples) ---"]
             for k in range(min(200, N)):
-                preview.append(
-                    f"{k:06d}: {signal[k].real:+.5f} {signal[k].imag:+.5f}j"
-                )
+                preview.append(f"{k:06d}: {signal[k].real:+.5f} {signal[k].imag:+.5f}j")
 
-            data_format = (
-                f"ILA CSV ({ch_name}) – {file_size_mb:.1f} MB"
-                + (f" (partial: {N:,})" if max_samples else "")
-            )
+            data_format = f"ILA CSV ({ch_name}) – {file_size_mb:.1f} MB" + (f" (partial: {N:,})" if max_samples else "")
             results.append((signal, data_format, "dual", preview, ch_name))
 
         return results if results else None
 
-    # ── Public entry point ─────────────────────────────────────────────────
+    @staticmethod
+    def detect_generic_csv(path):
+        import csv
+        import re
+        try:
+            with open(path, newline='', encoding='utf-8', errors='ignore') as f:
+                sample = f.read(4096)
+                if not sample:
+                    return False, None
+                f.seek(0)
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=',;\t|')
+                    reader = csv.reader(f, dialect)
+                except csv.Error:
+                    reader = csv.reader(f)
+                
+                rows = []
+                for _ in range(25):
+                    try:
+                        row = next(reader)
+                        if row:
+                            rows.append(row)
+                    except StopIteration:
+                        break
+        except Exception:
+            return False, None
+
+        if not rows:
+            return False, None
+
+        header_row_idx = -1
+        header_names = []
+        for i, row in enumerate(rows):
+            has_text = any(re.search(r'[a-zA-Z]', cell) for cell in row)
+            all_numeric = all(_CSVParser.is_number(cell) for cell in row if cell.strip())
+            if has_text and not all_numeric:
+                header_row_idx = i
+                header_names = [cell.strip().lower() for cell in row]
+                break
+        
+        if header_row_idx == -1:
+            first_data_row_idx = 0
+            for i, row in enumerate(rows):
+                if any(_CSVParser.is_number(cell) for cell in row):
+                    first_data_row_idx = i
+                    break
+            data_start_idx = first_data_row_idx
+        else:
+            data_start_idx = header_row_idx + 1
+
+        info = {
+            'data_start_idx': data_start_idx,
+            'channels': [],
+            'delimiter': dialect.delimiter if 'dialect' in locals() and dialect else ',',
+            'is_interleaved': False
+        }
+
+        i_cols = []
+        q_cols = []
+        mag_cols = []
+        phase_cols = []
+        
+        if header_row_idx != -1:
+            for idx, name in enumerate(header_names):
+                name = name.strip()
+                if not name:
+                    continue
+                if any(x in name for x in ['time', 'index', 'freq', 'date']):
+                    continue
+                if re.search(r'\bi\b|in-phase|real|^i|^re', name, re.IGNORECASE):
+                    i_cols.append(idx)
+                elif re.search(r'\bq\b|quad|imag|^q|^im', name, re.IGNORECASE):
+                    q_cols.append(idx)
+                elif re.search(r'\bmag\b|\bamp\b|magnitude|amplitude', name, re.IGNORECASE):
+                    mag_cols.append(idx)
+                elif re.search(r'\bphase\b|\bangle\b', name, re.IGNORECASE):
+                    phase_cols.append(idx)
+                    
+            for i in range(min(len(i_cols), len(q_cols))):
+                info['channels'].append({
+                    'type': 'iq',
+                    'i_col': i_cols[i],
+                    'q_col': q_cols[i],
+                    'name': f"ch{i+1}"
+                })
+                
+            for i in range(min(len(mag_cols), len(phase_cols))):
+                info['channels'].append({
+                    'type': 'polar',
+                    'mag_col': mag_cols[i],
+                    'phase_col': phase_cols[i],
+                    'name': f"ch{len(info['channels'])+1}_polar"
+                })
+
+        if not info['channels']:
+            numeric_cols = []
+            if len(rows) > data_start_idx:
+                test_row = rows[data_start_idx]
+                for idx, cell in enumerate(test_row):
+                    if _CSVParser.is_number(cell):
+                        numeric_cols.append(idx)
+            
+            if len(numeric_cols) >= 2:
+                for i in range(0, len(numeric_cols) - 1, 2):
+                    info['channels'].append({
+                        'type': 'iq',
+                        'i_col': numeric_cols[i],
+                        'q_col': numeric_cols[i+1],
+                        'name': f"ch{len(info['channels'])+1}"
+                    })
+            elif len(numeric_cols) == 1:
+                info['channels'].append({
+                    'type': 'interleaved',
+                    'col': numeric_cols[0],
+                    'name': 'ch1'
+                })
+                info['is_interleaved'] = True
+                
+        if info['channels']:
+            return True, info
+        
+        return False, None
+
+    @staticmethod
+    def load_generic_csv(path, file_size_mb, max_samples, stop_event, progress_callback, info):
+        import csv
+        import numpy as np
+        if progress_callback:
+            progress_callback(f"Parsing Generic CSV ({file_size_mb:.1f} MB, {len(info['channels'])} channels)...")
+
+        channels_data = {ch['name']: {'i': [], 'q': []} for ch in info['channels']}
+        interleaved_buffer = []
+
+        try:
+            with open(path, newline='', encoding='utf-8', errors='ignore') as f:
+                reader = csv.reader(f, delimiter=info.get('delimiter', ','))
+                
+                for _ in range(info['data_start_idx']):
+                    next(reader, None)
+                    
+                count = 0
+                for row in reader:
+                    if stop_event and stop_event.is_set():
+                        return None
+                        
+                    if not row:
+                        continue
+                        
+                    is_valid_row = False
+                    
+                    if info.get('is_interleaved'):
+                        ch = info['channels'][0]
+                        col = ch['col']
+                        if col < len(row) and _CSVParser.is_number(row[col]):
+                            interleaved_buffer.append(float(row[col]))
+                            is_valid_row = True
+                    else:
+                        for ch in info['channels']:
+                            if ch['type'] == 'iq':
+                                ic, qc = ch['i_col'], ch['q_col']
+                                if ic < len(row) and qc < len(row) and _CSVParser.is_number(row[ic]) and _CSVParser.is_number(row[qc]):
+                                    channels_data[ch['name']]['i'].append(float(row[ic]))
+                                    channels_data[ch['name']]['q'].append(float(row[qc]))
+                                    is_valid_row = True
+                            elif ch['type'] == 'polar':
+                                mc, pc = ch['mag_col'], ch['phase_col']
+                                if mc < len(row) and pc < len(row) and _CSVParser.is_number(row[mc]) and _CSVParser.is_number(row[pc]):
+                                    mag = float(row[mc])
+                                    phase = float(row[pc])
+                                    channels_data[ch['name']]['i'].append(mag * np.cos(phase))
+                                    channels_data[ch['name']]['q'].append(mag * np.sin(phase))
+                                    is_valid_row = True
+                                    
+                    if is_valid_row:
+                        count += 1
+                        if max_samples and count >= (max_samples * 2 if info.get('is_interleaved') else max_samples):
+                            break
+                            
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Error reading generic CSV: {e}")
+            return None
+
+        results = []
+        
+        if info.get('is_interleaved'):
+            ch_name = info['channels'][0]['name']
+            n_pairs = len(interleaved_buffer) // 2
+            if n_pairs > 0:
+                I = np.array(interleaved_buffer[0:n_pairs*2:2], dtype=np.float32)
+                Q = np.array(interleaved_buffer[1:n_pairs*2:2], dtype=np.float32)
+                signal = (I + 1j * Q).astype(np.complex64)
+                
+                preview = [f"--- Generic CSV Interleaved {ch_name} preview ({n_pairs} samples) ---"]
+                for k in range(min(200, n_pairs)):
+                    preview.append(f"{k:06d}: {signal[k].real:+.5f} {signal[k].imag:+.5f}j")
+                    
+                data_format = f"Generic CSV Interleaved ({ch_name}) - {file_size_mb:.1f} MB"
+                results.append((signal, data_format, "dual", preview, ch_name))
+        else:
+            for ch in info['channels']:
+                ch_name = ch['name']
+                i_data = channels_data[ch_name]['i']
+                q_data = channels_data[ch_name]['q']
+                
+                if not i_data:
+                    continue
+                    
+                I = np.array(i_data, dtype=np.float32)
+                Q = np.array(q_data, dtype=np.float32)
+                signal = (I + 1j * Q).astype(np.complex64)
+                N = len(signal)
+                
+                preview = [f"--- Generic CSV {ch_name} preview ({N} samples) ---"]
+                for k in range(min(200, N)):
+                    preview.append(f"{k:06d}: {signal[k].real:+.5f} {signal[k].imag:+.5f}j")
+                    
+                data_format = f"Generic CSV ({ch_name}) - {file_size_mb:.1f} MB"
+                results.append((signal, data_format, "dual", preview, ch_name))
+
+        return results if results else None
+
+
+class _BinaryParser:
+    @staticmethod
+    def auto_detect_dtype(path):
+        import os
+        ext = os.path.splitext(path)[1].lower()
+        if ext in {'.cf32', '.fc32', '.c32'}:
+            return 'complex64'
+        if ext in {'.cf64', '.fc64', '.c64'}:
+            return 'complex128'
+        if ext in {'.cs16', '.sc16', '.cfile'}:
+            return 'int16'
+        if ext in {'.sc8', '.s8', '.iq'}:
+            return 'int8'
+        if ext == '.u8':
+            return 'uint8'
+        return 'complex64'
+
+    @staticmethod
+    def bin_str_to_int16(s):
+        s = s.strip()
+        if not s:
+            return 0
+        try:
+            val = int(s, 2)
+            if val & 0x8000:
+                val -= 0x10000
+            return val
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def load_binary(path, file_size_mb, max_samples, stop_event, progress_callback, bin_dtype):
+        import numpy as np
+        if progress_callback:
+            progress_callback(f"Loading binary file ({file_size_mb:.1f} MB), type={bin_dtype}...")
+
+        dtype_map = {
+            'complex64': np.complex64,
+            'complex128': np.complex128,
+            'float32': np.float32,
+            'float64': np.float64,
+            'int32': np.int32,
+            'int16': np.int16,
+            'int8': np.int8,
+            'uint8': np.uint8
+        }
+        dt = dtype_map.get(bin_dtype, np.complex64)
+        count = -1 if not max_samples else max_samples
+
+        try:
+            raw_data = np.fromfile(path, dtype=dt, count=count)
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Error reading binary file: {e}")
+            return None, None, None, None
+
+        if stop_event and stop_event.is_set():
+            return None, None, None, None
+
+        is_complex_dtype = np.issubdtype(dt, np.complexfloating)
+        if not is_complex_dtype:
+            if len(raw_data) % 2 != 0:
+                raw_data = raw_data[:-1]
+            I = raw_data[0::2].astype(np.float32)
+            Q = raw_data[1::2].astype(np.float32)
+
+            if dt == np.int16:
+                I /= 32768.0
+                Q /= 32768.0
+            elif dt == np.int8:
+                I /= 128.0
+                Q /= 128.0
+            elif dt == np.uint8:
+                I = (I - 128.0) / 128.0
+                Q = (Q - 128.0) / 128.0
+
+            signal = (I + 1j * Q).astype(np.complex64)
+        else:
+            signal = raw_data.astype(np.complex64)
+
+        if stop_event and stop_event.is_set():
+            return None, None, None, None
+
+        N = len(signal)
+        preview = [f"--- Binary Data Preview ({bin_dtype}, {N} samples) ---"]
+        for i in range(min(500, N)):
+            preview.append(f"{i:06d}: {signal[i].real:+.6f} {signal[i].imag:+.6f}j")
+
+        data_format = f"Binary ({bin_dtype}) - {file_size_mb:.1f} MB"
+        if max_samples:
+            data_format += f" (Partial: {N:,})"
+
+        return signal, data_format, "dual", preview
+
+
+class _HexTextParser:
+    @staticmethod
+    def is_hex_format(line):
+        if not line:
+            return False
+        parts = line.split()
+        if not parts:
+            return False
+        for p in parts:
+            try:
+                int(p, 16)
+            except ValueError:
+                return False
+        return True
+
+    @staticmethod
+    def detect_channel_mode(path):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith('#'):
+                        parts = stripped.split()
+                        if len(parts) == 1:
+                            return "single"
+                        elif len(parts) == 2:
+                            return "dual"
+                        else:
+                            return "dual"
+        except Exception:
+            return "dual"
+        return "dual"
+
+    @staticmethod
+    def load_hex(path, file_size_mb, max_samples, stop_event, progress_callback, channel_mode_var, hex_signed, scale_factor, q15_format):
+        import numpy as np
+        if progress_callback:
+            progress_callback(f"Loading hex file ({file_size_mb:.1f} MB)...")
+
+        data = []
+        count = 0
+        mode = "dual"
+
+        if channel_mode_var:
+            mode = channel_mode_var.get()
+            if mode == "auto":
+                mode = _HexTextParser.detect_channel_mode(path)
+                channel_mode_var.set(mode)
+        else:
+            mode = _HexTextParser.detect_channel_mode(path)
+
+        preview = [f"--- Hex Data Preview (Mode: {mode}) ---"]
+
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            for i, line in enumerate(f):
+                if stop_event and i % 1000 == 0 and stop_event.is_set():
+                    return None, None, None, None
+
+                line_stripped = line.strip()
+                if line_stripped.startswith('#'):
+                    continue
+                if not line_stripped:
+                    continue
+
+                if i < 500:
+                    preview.append(f"{i:06d}: {line_stripped}")
+
+                if max_samples and count >= max_samples:
+                    break
+
+                try:
+                    parts = line_stripped.split()
+                    if mode == "single":
+                        if len(parts) >= 1:
+                            val = int(parts[0], 16)
+                            if hex_signed:
+                                bits = len(parts[0]) * 4
+                                if val >= (1 << (bits - 1)):
+                                    val -= (1 << bits)
+                            if q15_format:
+                                val /= 32768.0
+                            val *= scale_factor
+                            data.append(complex(val, 0))
+                            count += 1
+                    else:
+                        if len(parts) >= 2:
+                            i_val = int(parts[0], 16)
+                            q_val = int(parts[1], 16)
+                            if hex_signed:
+                                bits_i = len(parts[0]) * 4
+                                bits_q = len(parts[1]) * 4
+                                if i_val >= (1 << (bits_i - 1)):
+                                    i_val -= (1 << bits_i)
+                                if q_val >= (1 << (bits_q - 1)):
+                                    q_val -= (1 << bits_q)
+                            if q15_format:
+                                i_val /= 32768.0
+                                q_val /= 32768.0
+                            i_val *= scale_factor
+                            q_val *= scale_factor
+                            data.append(complex(i_val, q_val))
+                            count += 1
+                except Exception:
+                    pass
+
+        signal = np.array(data, dtype=np.complex64)
+        data_format = f"Hex Data - {file_size_mb:.1f} MB"
+        if max_samples:
+            data_format += f" (Partial: {max_samples:,} samples)"
+
+        return signal, data_format, mode, preview
+
+    @staticmethod
+    def load_standard_text(path, file_size_mb, max_samples, stop_event, progress_callback):
+        import numpy as np
+        if progress_callback:
+            progress_callback(f"Loading text file ({file_size_mb:.1f} MB)...")
+
+        data = []
+        count = 0
+        raw_hex_data = ["--- Text Data Preview ---"]
+
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            for i, line in enumerate(f):
+                if stop_event and i % 1000 == 0 and stop_event.is_set():
+                    return None, None, None, None
+
+                line_stripped = line.strip()
+                if line_stripped.startswith('#'):
+                    continue
+
+                if i < 500:
+                    raw_hex_data.append(f"{i:06d}: {line_stripped}")
+
+                line_stripped = line_stripped.replace('i', 'j').replace(' ', '')
+                if line_stripped:
+                    if max_samples and count >= max_samples:
+                        break
+                    try:
+                        data.append(complex(line_stripped))
+                        count += 1
+                    except Exception:
+                        pass
+
+        signal = np.array(data, dtype=np.complex64)
+        data_format = f"Text (Complex) - {file_size_mb:.1f} MB"
+        if max_samples:
+            data_format += f" (Partial: {max_samples:,} samples)"
+
+        return signal, data_format, "dual", raw_hex_data
+
+
+class DataLoader:
+    _BINARY_EXTENSIONS = {
+        '.bin', '.dat', '.raw',
+        '.doa', '.iq',
+        '.cf32', '.fc32',
+        '.cf64', '.fc64',
+        '.c64', '.cfile',
+        '.c32', '.cs16', '.sc16', '.sigmf-data',
+        '.sc8', '.s8', '.u8',
+    }
 
     @staticmethod
     def load_file(path, max_samples=None, stop_event=None, progress_callback=None,
                   channel_mode_var=None, hex_signed=True, scale_factor=1.0,
                   q15_format=False, bin_dtype="auto"):
+
+        import os
+        import numpy as np
 
         file_size_mb = os.path.getsize(path) / (1024 * 1024)
         ext = os.path.splitext(path)[1].lower()
@@ -228,14 +649,22 @@ class DataLoader:
 
             if not is_binary_content:
                 # Try ILA CSV detection
-                is_ila, iq_pairs = DataLoader._detect_ila_csv(path)
+                is_ila, iq_pairs = _CSVParser.detect_ila_csv(path)
                 if is_ila:
-                    return DataLoader._load_ila_csv(
+                    return _CSVParser.load_ila_csv(
                         path, file_size_mb, max_samples,
                         stop_event, progress_callback, iq_pairs
                     )
 
-        # ── Binary / hex / standard text (unchanged original logic) ───────
+                # Try Generic CSV Detection
+                is_generic, generic_info = _CSVParser.detect_generic_csv(path)
+                if is_generic:
+                    return _CSVParser.load_generic_csv(
+                        path, file_size_mb, max_samples,
+                        stop_event, progress_callback, generic_info
+                    )
+
+        # ── Binary / hex / standard text ───────
         is_binary = ext in DataLoader._BINARY_EXTENSIONS
 
         if not is_binary:
@@ -253,10 +682,10 @@ class DataLoader:
 
         if is_binary:
             if not bin_dtype or bin_dtype == 'auto':
-                bin_dtype = DataLoader._auto_detect_dtype(path)
+                bin_dtype = _BinaryParser.auto_detect_dtype(path)
                 if progress_callback:
                     progress_callback(f"Auto-detected format: {bin_dtype}")
-            return DataLoader._load_binary(
+            return _BinaryParser.load_binary(
                 path, file_size_mb, max_samples, stop_event,
                 progress_callback, bin_dtype
             )
@@ -272,229 +701,14 @@ class DataLoader:
         if stop_event and stop_event.is_set():
             return None, None, None, None
 
-        if DataLoader._is_hex_format(first_line):
-            return DataLoader._load_hex(
+        if _HexTextParser.is_hex_format(first_line):
+            return _HexTextParser.load_hex(
                 path, file_size_mb, max_samples, stop_event,
                 progress_callback, channel_mode_var, hex_signed,
                 scale_factor, q15_format
             )
         else:
-            return DataLoader._load_standard_text(
+            return _HexTextParser.load_standard_text(
                 path, file_size_mb, max_samples, stop_event,
                 progress_callback
             )
-
-    # ── Everything below is unchanged from original ────────────────────────
-
-    @staticmethod
-    def _is_hex_format(line):
-        line = line.replace(' ', '').replace('\t', '')
-        if len(line) != 8:
-            return False
-        try:
-            int(line, 16)
-            return True
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _detect_channel_mode(path):
-        try:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = []
-                for _ in range(200):
-                    l = f.readline().strip()
-                    if not l or l.startswith('#'):
-                        continue
-                    l = l.replace(' ', '').replace('\t', '')
-                    if len(l) == 8:
-                        lines.append(l)
-
-            if not lines:
-                return "dual"
-
-            zero_low  = sum(1 for l in lines if l.startswith('0000'))
-            zero_high = sum(1 for l in lines if l.endswith('0000'))
-
-            if zero_low > len(lines) * 0.7 or zero_high > len(lines) * 0.7:
-                return "single"
-            return "dual"
-        except Exception:
-            return "dual"
-
-    @staticmethod
-    def _load_binary(path, file_size_mb, max_samples, stop_event,
-                     progress_callback, bin_dtype):
-        if progress_callback:
-            progress_callback(f"Loading binary file ({file_size_mb:.1f} MB)...")
-
-        dtype_map = {
-            "complex64" : np.complex64,
-            "complex128": np.complex128,
-            "float32"   : np.float32,
-            "int16"     : np.int16,
-            "int8"      : np.int8,
-            "uint8"     : np.uint8,
-        }
-        np_dtype = dtype_map.get(bin_dtype, np.complex64)
-        raw_sig = np.fromfile(path, dtype=np_dtype)
-
-        if stop_event and stop_event.is_set():
-            return None, None, None, None
-
-        if max_samples and len(raw_sig) > max_samples:
-            if bin_dtype in ("complex64", "complex128"):
-                raw_sig = raw_sig[:max_samples]
-            else:
-                raw_sig = raw_sig[:max_samples * 2]
-
-        if bin_dtype == "complex64":
-            signal = raw_sig
-        elif bin_dtype == "complex128":
-            signal = raw_sig.astype(np.complex64)
-        else:
-            i_data = raw_sig[0::2].astype(np.float32)
-            q_data = raw_sig[1::2].astype(np.float32)
-            min_len = min(len(i_data), len(q_data))
-            signal  = i_data[:min_len] + 1j * q_data[:min_len]
-
-        data_format = f"Binary ({bin_dtype}) - {file_size_mb:.1f} MB"
-        if max_samples:
-            data_format += f" (Partial: {max_samples:,} samples)"
-
-        preview_samples = min(500, len(signal))
-        raw_hex_data = [f"--- Binary Preview ({bin_dtype}) ---"]
-        for i in range(preview_samples):
-            val = signal[i]
-            raw_hex_data.append(f"{i:06d}: {val.real:+.2f} {val.imag:+.2f}j")
-
-        return signal, data_format, "dual", raw_hex_data
-
-    @staticmethod
-    def _load_hex(path, file_size_mb, max_samples, stop_event, progress_callback,
-                  channel_mode_var, hex_signed, scale_factor, q15_format):
-        if progress_callback:
-            progress_callback(f"Parsing hex file ({file_size_mb:.1f} MB)...")
-
-        detected_mode = DataLoader._detect_channel_mode(path)
-
-        if channel_mode_var:
-            if "single" in channel_mode_var:
-                channel_mode = "single"
-            elif "dual" in channel_mode_var:
-                channel_mode = "dual"
-            else:
-                channel_mode = detected_mode
-        else:
-            channel_mode = detected_mode
-
-        try:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-
-            if stop_event and stop_event.is_set():
-                return None, None, None, None
-
-            content_lines = content.splitlines()
-            content_lines = [ln for ln in content_lines if not ln.lstrip().startswith('#')]
-            content = '\n'.join(content_lines)
-
-            table   = str.maketrans('', '', ' \t\n\r,;[]{}')
-            hex_str = content.translate(table)
-
-            if len(hex_str) % 4 != 0:
-                hex_str = hex_str[:(len(hex_str) // 4) * 4]
-
-            if progress_callback:
-                progress_callback("Converting hex to bytes...")
-            raw_bytes = bytes.fromhex(hex_str)
-            samples   = np.frombuffer(raw_bytes, dtype='>i2').astype(np.float32)
-
-            if stop_event and stop_event.is_set():
-                return None, None, None, None
-
-            raw_hex_data = []
-
-            if channel_mode == "single":
-                if len(hex_str) % 8 == 0:
-                    lines_count   = len(hex_str) // 8
-                    preview_count = min(100, lines_count)
-                    for i in range(preview_count):
-                        raw_hex_data.append(
-                            f"{i:06d}: {hex_str[i*8:i*8+4]} {hex_str[i*8+4:i*8+8]}")
-
-                    s8 = samples.reshape(-1, 2)
-                    zeros_col0 = np.sum(s8[:, 0] == 0)
-                    zeros_col1 = np.sum(s8[:, 1] == 0)
-                    i_data = s8[:, 1] if zeros_col0 > zeros_col1 else s8[:, 0]
-                    q_data = np.zeros_like(i_data)
-                else:
-                    i_data = samples
-                    q_data = np.zeros_like(i_data)
-            else:
-                if len(samples) % 2 != 0:
-                    samples = samples[:-1]
-                i_data = samples[0::2]
-                q_data = samples[1::2]
-
-                preview_count = min(100, len(i_data))
-                for i in range(preview_count):
-                    raw_hex_data.append(
-                        f"{i:06d}: {hex_str[i*8:i*8+4]} {hex_str[i*8+4:i*8+8]}")
-
-            if not hex_signed:
-                i_data = np.where(i_data < 0, i_data + 65536, i_data)
-                q_data = np.where(q_data < 0, q_data + 65536, q_data)
-
-            scale  = (1.0 / 32768.0) if q15_format else scale_factor
-            signal = (i_data + 1j * q_data) * scale
-
-            if max_samples and len(signal) > max_samples:
-                signal = signal[:max_samples]
-
-            data_format = f"Hex ({channel_mode} channel) - {file_size_mb:.1f} MB"
-            return signal, data_format, channel_mode, raw_hex_data
-
-        except Exception as e:
-            if progress_callback:
-                progress_callback(f"Error loading hex: {str(e)}")
-            return None, None, None, None
-
-    @staticmethod
-    def _load_standard_text(path, file_size_mb, max_samples, stop_event,
-                            progress_callback):
-        if progress_callback:
-            progress_callback(f"Loading text file ({file_size_mb:.1f} MB)...")
-
-        data         = []
-        count        = 0
-        raw_hex_data = ["--- Text Data Preview ---"]
-
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            for i, line in enumerate(f):
-                if stop_event and i % 1000 == 0 and stop_event.is_set():
-                    return None, None, None, None
-
-                line_stripped = line.strip()
-                if line_stripped.startswith('#'):
-                    continue
-
-                if i < 500:
-                    raw_hex_data.append(f"{i:06d}: {line_stripped}")
-
-                line_stripped = line_stripped.replace('i', 'j').replace(' ', '')
-                if line_stripped:
-                    if max_samples and count >= max_samples:
-                        break
-                    try:
-                        data.append(complex(line_stripped))
-                        count += 1
-                    except Exception:
-                        pass
-
-        signal      = np.array(data, dtype=np.complex64)
-        data_format = f"Text (Complex) - {file_size_mb:.1f} MB"
-        if max_samples:
-            data_format += f" (Partial: {max_samples:,} samples)"
-
-        return signal, data_format, "dual", raw_hex_data
