@@ -1,11 +1,24 @@
-node_modules
+# Dependencies
+node_modules/
 venv/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
+
+# IQ/binary data files
 *.cf32
 *.bin
 *.iq
+
+# Build artifacts
 dist/
-dist-ssr
+dist-ssr/
+build/
+build_files/
+*.spec
+launcher.py
+
+# Logs
 *.log
