@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
 
-const BASE = `http://${window.location.hostname}:8000`;
+const BASE = '';
 
 const PAIR_COLORS = ['#ff6b8a', '#5ade9a', '#ffc046', '#9b6bff'];
 

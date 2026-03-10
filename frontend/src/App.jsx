@@ -7,7 +7,7 @@ import CfarChart from './components/CfarChart';
 import FilterResponseChart from './components/FilterResponseChart';
 import DoaChart from './components/DoaChart';
 
-const BASE = `http://${window.location.hostname}:8000`;
+const BASE = '';
 
 const Label = ({ children }) => (
   <div style={{ fontSize: 10, color: '#4a5a7a', letterSpacing: '0.09em', textTransform: 'uppercase', marginBottom: 5, fontFamily: 'monospace' }}>{children}</div>

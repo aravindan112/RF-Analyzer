@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
-const BASE = `http://${window.location.hostname}:8000`;
+const BASE = '';
 
 export default function FilterResponseChart({ dspVersion = 0, lpfEnabled = false }) {
   const [data, setData] = useState(null);

@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
 
 // FIX: use hostname so this works outside localhost
-const BASE = `http://${window.location.hostname}:8000`;
+const BASE = '';
 
 export default function CfarChart({
   activeDatasetId,
