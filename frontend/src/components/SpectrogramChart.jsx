@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import Plot from 'react-plotly.js';
-const BASE = 'http://localhost:8000';
+const BASE = `http://${window.location.hostname}:8000`;
 
 export default function SpectrogramChart({
   activeDatasetId,

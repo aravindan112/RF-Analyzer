@@ -378,7 +378,7 @@ export default function SpectrumChart({
   }, []);
 
   // ── Derived readouts ──────────────────────────────────────────────────────
-  const rbwHz = zsData?.rbw_hz != null ? zsData.rbw_hz * 5 : null;
+  const rbwHz = zsData?.rbw_hz != null ? zsData.rbw_hz : null;
   const rbwDisplay = rbwHz == null ? '—' : rbwHz >= 1000 ? `${(rbwHz / 1000).toFixed(2)} kHz` : `${rbwHz.toFixed(0)} Hz`;
   const timeResDisplay = zsData?.time_res_us != null ? `${Number(zsData.time_res_us).toFixed(1)} µs` : '—';
   const zsPeakPwr = zsData?.powers_db?.length ? safeMax(zsData.powers_db) : null;

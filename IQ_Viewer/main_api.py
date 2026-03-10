@@ -23,12 +23,24 @@ app.add_middleware(
 
 data_manager = DataManager()
 
+
 def _compute_frame_psd(frame: np.ndarray, fft_size: int, eff_fs: float) -> np.ndarray:
+    """
+    Compute power spectrum of one frame in dBFS.
+
+    FIX (was broken):
+      OLD: win_norm = win / sqrt(sum(win²))  then  psd = |X|²/eff_fs
+           → added ~-78 dB offset at 65 MHz because of the /eff_fs PSD conversion.
+           → result was in W/Hz (power spectral density), not dBFS.
+      NEW: win_norm = win / sum(win)  (amplitude-coherent normalisation)
+           → |X[peak_bin]| == signal amplitude for a pure tone → 0 dBFS = full scale.
+           → No /eff_fs division, so values are sample-rate independent.
+    """
     win      = np.hanning(fft_size)
-    win_norm = win / np.sqrt(np.sum(win ** 2))
+    win_norm = win / np.sum(win)                              # FIX: was /sqrt(sum(win²))
     X        = np.fft.fftshift(np.fft.fft(frame * win_norm, n=fft_size))
-    psd      = (np.abs(X) ** 2) / eff_fs
-    return 10 * np.log10(psd + 1e-20)
+    return 20 * np.log10(np.abs(X) + 1e-20)                  # FIX: was 10*log10(|X|²/eff_fs)
+
 
 # ── File Management ────────────────────────────────────────────────────────
 
@@ -36,6 +48,7 @@ def _compute_frame_psd(frame: np.ndarray, fft_size: int, eff_fs: float) -> np.nd
 def clear_all_datasets():
     data_manager.clear_all()
     return {"status": "ok"}
+
 
 @app.post("/api/load")
 async def load_file(
@@ -69,8 +82,7 @@ async def load_file(
     if result is None:
         return {"error": "Failed to load file"}
 
-    # ── Multi-channel ILA CSV: returns a list of channel tuples ───────────
-    # Each tuple: (signal, data_format, channel_mode, raw_hex, ch_name)
+    # ── Multi-channel ILA CSV ─────────────────────────────────────────────
     if isinstance(result, list):
         loaded = []
         for (signal, data_format, mode_detected, raw_hex, ch_name) in result:
@@ -104,7 +116,6 @@ async def load_file(
         return {
             "multi_channel": True,
             "channels":      loaded,
-            # Convenience fields pointing at first channel
             "dataset_id":    loaded[0]["dataset_id"],
             "total_samples": loaded[0]["total_samples"],
             "duration_ms":   loaded[0]["duration_ms"],
@@ -112,7 +123,7 @@ async def load_file(
             "data_format":   loaded[0]["data_format"],
         }
 
-    # ── Single-signal path (original behaviour, unchanged) ────────────────
+    # ── Single-signal path ────────────────────────────────────────────────
     signal, data_format, mode_detected, raw_hex = result
 
     if signal is None:
@@ -141,10 +152,12 @@ async def load_file(
         "data_format":   data_format,
     }
 
+
 @app.delete("/api/remove/{dataset_id}")
 def remove_file(dataset_id: str):
     data_manager.remove_dataset(dataset_id)
     return {"ok": True}
+
 
 @app.get("/api/files")
 def list_files():
@@ -153,6 +166,7 @@ def list_files():
         info = data_manager.get_info(ds_id)
         result.append({"dataset_id": ds_id, **info})
     return result
+
 
 # ── DSP Parameters ─────────────────────────────────────────────────────────
 
@@ -174,6 +188,7 @@ class DSPParams(BaseModel):
     doa_spacing:    float = 0.5
     doa_mode:       str   = "ULA"
 
+
 @app.post("/api/dsp/params")
 def set_dsp_params(params: DSPParams):
     data_manager.update_all_fs(params.fs_mhz * 1e6)
@@ -187,6 +202,7 @@ def set_dsp_params(params: DSPParams):
     data_manager.set_cfar_params(params.cfar_guard, params.cfar_ref, params.cfar_threshold)
     data_manager.set_doa_params(params.doa_rows, params.doa_cols, params.doa_spacing, params.doa_mode)
     return {"ok": True}
+
 
 # ── IQ Time Series ─────────────────────────────────────────────────────────
 
@@ -209,6 +225,7 @@ def get_iq_timeseries(
 
     return {"t": t.tolist(), "i": data.real.tolist(), "q": data.imag.tolist()}
 
+
 # ── Spectrum ───────────────────────────────────────────────────────────────
 
 @app.get("/api/spectrum")
@@ -227,15 +244,16 @@ def get_spectrum(
     eff_fs     = data_manager.get_effective_fs(dataset_id=dataset_id)
     num_frames = len(data) // fft_size
 
-    # Remove DC offset (mean subtraction) to suppress IQ imbalance spike at 0 Hz
+    # Remove DC offset to suppress IQ imbalance spike at 0 Hz
     data = data - np.mean(data)
 
     if average_frames and num_frames > 1:
-        psd_accum = np.zeros(fft_size)
+        # Average in linear power domain, convert back to dB
+        pwr_accum = np.zeros(fft_size)
         for j in range(num_frames):
             frame      = data[j * fft_size:(j + 1) * fft_size]
-            psd_accum += 10 ** (_compute_frame_psd(frame, fft_size, eff_fs) / 10)
-        power_db = 10 * np.log10(psd_accum / num_frames + 1e-20)
+            pwr_accum += 10 ** (_compute_frame_psd(frame, fft_size, eff_fs) / 10)
+        power_db = 10 * np.log10(pwr_accum / num_frames + 1e-20)
     else:
         power_db = _compute_frame_psd(data[:fft_size], fft_size, eff_fs)
 
@@ -245,17 +263,20 @@ def get_spectrum(
     freqs    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     peak_idx = int(np.argmax(power_db))
     noise_db = DSPProcessor.estimate_noise_floor(power_db, peak_idx, fft_size)
-    noise_db = max(noise_db, -120.0)
+    # FIX: removed hard clamp at -120 dB.
+    # The clamp was masking the true noise floor and producing a fake SNR.
+    # estimate_noise_floor now returns the real value in dBFS.
 
     return {
         "freqs":      freqs.tolist(),
         "power_db":   power_db.tolist(),
         "peak_mhz":   float(freqs[peak_idx]),
         "peak_db":    float(power_db[peak_idx]),
-        "noise_db":   noise_db,
-        "snr_db":     float(power_db[peak_idx]) - noise_db,
+        "noise_db":   float(noise_db),
+        "snr_db":     float(power_db[peak_idx]) - float(noise_db),
         "num_frames": num_frames,
     }
+
 
 # ── Constellation ──────────────────────────────────────────────────────────
 
@@ -278,6 +299,7 @@ def get_constellation(
         I, Q = I - np.mean(I), Q - np.mean(Q)
 
     return {"i": I.tolist(), "q": Q.tolist()}
+
 
 # ── Spectrogram ────────────────────────────────────────────────────────────
 
@@ -312,14 +334,15 @@ def get_spectrogram(
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     return {"spec": spec, "times": times, "freqs": freqs.tolist()}
 
+
 # ── CFAR ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/cfar")
 def get_cfar(
     dataset_id:   str,
-    position_ms:  float        = 0.0,
-    window_ms:    float        = 10.0,
-    fft_size:     int          = 1024,
+    position_ms:  float           = 0.0,
+    window_ms:    float           = 10.0,
+    fft_size:     int             = 1024,
     guard_cells:  Optional[int]   = None,
     ref_cells:    Optional[int]   = None,
     threshold_db: Optional[float] = None,
@@ -328,26 +351,25 @@ def get_cfar(
     if data is None or len(data) < fft_size:
         return {"error": "Insufficient data"}
 
-    eff_fs   = data_manager.get_effective_fs(dataset_id=dataset_id)
-    g        = guard_cells  if guard_cells  is not None else data_manager.cfar_guard
-    r        = ref_cells    if ref_cells    is not None else data_manager.cfar_ref
-    thr      = threshold_db if threshold_db is not None else data_manager.cfar_threshold
+    eff_fs = data_manager.get_effective_fs(dataset_id=dataset_id)
+    g      = guard_cells  if guard_cells  is not None else data_manager.cfar_guard
+    r      = ref_cells    if ref_cells    is not None else data_manager.cfar_ref
+    thr    = threshold_db if threshold_db is not None else data_manager.cfar_threshold
 
-    # Remove DC offset before spectral analysis
-    data = data - np.mean(data)
+    data     = data - np.mean(data)
     power_db = _compute_frame_psd(data[:fft_size], fft_size, eff_fs)
     freqs    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
-    N        = len(power_db)
+    Nf       = len(power_db)
 
-    kernel            = np.ones(2 * r + 2 * g + 1)
-    kernel[r:r+2*g+1] = 0
-    kernel           /= (np.sum(kernel) if np.sum(kernel) > 0 else 1)
+    kernel             = np.ones(2 * r + 2 * g + 1)
+    kernel[r:r+2*g+1]  = 0
+    kernel            /= (np.sum(kernel) if np.sum(kernel) > 0 else 1)
 
     noise_floor = np.convolve(power_db, kernel, mode='same')
     threshold   = noise_floor + thr
-    mask        = np.ones(N, dtype=bool)
-    mask[:r+g]  = False
-    mask[-(r+g):] = False
+    mask        = np.ones(Nf, dtype=bool)
+    mask[:r+g]      = False
+    mask[-(r+g):]   = False
     peaks = np.where((power_db > threshold) & mask)[0]
 
     return {
@@ -361,6 +383,7 @@ def get_cfar(
         "cfar_ref":       r,
         "cfar_threshold": thr,
     }
+
 
 # ── Filter Response ────────────────────────────────────────────────────────
 
@@ -382,6 +405,7 @@ def get_filter_response():
         "num_taps":  len(taps),
         "window":    data_manager.lpf_window,
     }
+
 
 # ── DoA ────────────────────────────────────────────────────────────────────
 
@@ -465,6 +489,7 @@ def get_doa(
         "phases":         [p["dphi"] for p in pair_info],
     }
 
+
 # ── Zero Span ──────────────────────────────────────────────────────────────
 
 @app.get("/api/zero_span")
@@ -504,17 +529,16 @@ def get_zero_span(
     if n_frames <= 0:
         return {"error": "Not enough data for zero-span. Increase Window (ms)."}
 
+    # FIX: use amplitude-coherent window normalisation (win / sum(win))
+    # so that a tone of amplitude A gives |X[peak_bin]| = A → dBFS is correct.
+    # OLD used win / sqrt(sum(win²)) with a /ref division that was dimensionally wrong.
     win      = np.hanning(zs_fft_size)
-    win_norm = win / np.sqrt(np.sum(win ** 2))
+    win_norm = win / np.sum(win)                              # FIX: amplitude-normalised
 
-    freqs = np.fft.fftshift(np.fft.fftfreq(zs_fft_size, d=1.0 / eff_fs))
+    freqs            = np.fft.fftshift(np.fft.fftfreq(zs_fft_size, d=1.0 / eff_fs))
     target_freq      = center_mhz * 1e6
     original_bin_idx = int(np.argmin(np.abs(freqs - target_freq)))
-
-    if dc_downconvert:
-        bin_idx = zs_fft_size // 2
-    else:
-        bin_idx = original_bin_idx
+    bin_idx          = zs_fft_size // 2 if dc_downconvert else original_bin_idx
 
     half_int = 2
     bin_lo   = max(0, bin_idx - half_int)
@@ -528,10 +552,13 @@ def get_zero_span(
         frame = data[start: start + zs_fft_size]
         if len(frame) < zs_fft_size:
             break
-        X       = np.fft.fftshift(np.fft.fft(frame * win_norm, n=zs_fft_size))
-        band    = X[bin_lo:bin_hi]
-        ref     = float(np.sum(win_norm) ** 2)
-        psd_val = np.sum(np.abs(band) ** 2) / ref
+        X    = np.fft.fftshift(np.fft.fft(frame * win_norm, n=zs_fft_size))
+        band = X[bin_lo:bin_hi]
+
+        # FIX: power = sum of squared amplitudes in band (no /ref division needed
+        # because win_norm already ensures correct amplitude scaling).
+        # Use 20*log10 base so that 0 dBFS = amplitude of 1.0.
+        psd_val = float(np.sum(np.abs(band) ** 2))
         powers_db.append(float(10 * np.log10(psd_val + 1e-20)))
         times_ms.append(float(position_ms + (start / eff_fs) * 1000.0))
 
@@ -585,10 +612,22 @@ def get_zero_span(
         "bin_hi":      int(original_bin_idx + 3),
     }
 
+
 # ── Serve React build ──────────────────────────────────────────────────────
 
-if os.path.exists("frontend/dist"):
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
+# ── Locate frontend/dist whether running as .py or .exe ──────────────────
+import sys as _sys
+if getattr(_sys, 'frozen', False):
+    # Running inside PyInstaller bundle — files are in _MEIPASS
+    _base = _sys._MEIPASS
+else:
+    _base = os.path.dirname(os.path.abspath(__file__))
+    # When running normally, frontend/dist is two levels up from IQ_Viewer/
+    _base = os.path.dirname(_base)
+
+_frontend_dist = os.path.join(_base, "frontend", "dist")
+if os.path.exists(_frontend_dist):
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="static")
 
 if __name__ == "__main__":
     uvicorn.run("main_api:app", host="0.0.0.0", port=8000, reload=True)
