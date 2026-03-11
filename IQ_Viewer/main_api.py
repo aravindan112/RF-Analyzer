@@ -285,27 +285,40 @@ def get_spectrum(
         power_db -= np.max(power_db)
 
     power_db    = _sanitize(power_db)
-    freqs       = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
+    freqs_hz    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs))
+    freqs_mhz   = freqs_hz / 1e6
     peak_idx    = int(np.argmax(power_db))
     peak_db_val = float(power_db[peak_idx])
 
-    # Pre-filter deep LPF stopband nulls before noise estimation
-    dynamic_threshold = peak_db_val - 100.0
-    valid_bins        = power_db[power_db > dynamic_threshold]
-    floor_clamp       = float(np.percentile(valid_bins, 5)) if len(valid_bins) > 10 else dynamic_threshold
-    power_db_for_noise = np.clip(power_db, floor_clamp, 0.0)
+    # ── Passband mask for noise estimation ────────────────────────────────
+    # When LPF is active, restrict noise estimation to in-passband bins only.
+    # Without this, stopband rolloff bins (which can be -150 dB or lower) are
+    # mistaken for the noise floor, producing wildly wrong SNR readings that
+    # change unpredictably with decimation factor.
+    passband_mask = None
+    if data_manager.use_lpf:
+        # Determine the cutoff frequency in Hz
+        if data_manager.lpf_cutoff_auto:
+            # Auto cutoff = 80% of Nyquist of the decimated rate
+            cutoff_hz = (eff_fs / 2.0) * 0.8
+        else:
+            cutoff_hz = data_manager.lpf_cutoff_hz if data_manager.lpf_cutoff_hz is not None \
+                        else (eff_fs / 2.0) * 0.8
+        # Build mask: True for bins that fall inside the passband
+        passband_mask = np.abs(freqs_hz) <= cutoff_hz
 
-    # Estimate noise floor
-    noise_db_per_bin = DSPProcessor.estimate_noise_floor(power_db_for_noise, peak_idx, fft_size)
+    # Estimate noise floor — passband-aware when LPF is on
+    noise_db_per_bin = DSPProcessor.estimate_noise_floor(
+        power_db, peak_idx, fft_size, passband_mask=passband_mask
+    )
 
-    # SNR = peak power minus noise floor
-    # Simple, intuitive reading — what SDR users expect to see
+    # SNR = peak power minus noise floor (simple, intuitive)
     snr_db = peak_db_val - float(noise_db_per_bin)
 
     return {
-        "freqs":      freqs.tolist(),
+        "freqs":      freqs_mhz.tolist(),
         "power_db":   power_db.tolist(),
-        "peak_mhz":   float(freqs[peak_idx]),
+        "peak_mhz":   float(freqs_mhz[peak_idx]),
         "peak_db":    float(power_db[peak_idx]),
         "noise_db":   float(noise_db_per_bin),
         "snr_db":     float(snr_db),

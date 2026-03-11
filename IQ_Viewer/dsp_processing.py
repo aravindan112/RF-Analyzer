@@ -89,27 +89,53 @@ class DSPProcessor:
         return power_db, freqs_mhz
 
     @staticmethod
-    def estimate_noise_floor(power_db, peak_idx, fft_size):
-        # 1. Restrict to center 50% to avoid LPF roll-offs at the edges
-        q = fft_size // 4
-        center_band = power_db[q : 3*q]
-        
-        # 2. Exclude the signal peak area from the candidates
-        peak_idx_rel = peak_idx - q
-        if 0 <= peak_idx_rel < len(center_band):
-            # Exclude ±2.5% around the peak
-            exclude_width = max(2, fft_size // 40)
-            mask = np.ones(len(center_band), dtype=bool)
-            mask[max(0, peak_idx_rel - exclude_width) : min(len(center_band), peak_idx_rel + exclude_width + 1)] = False
-            noise_candidates = center_band[mask]
+    def estimate_noise_floor(power_db, peak_idx, fft_size, passband_mask=None):
+        """
+        Estimate the noise floor from the power spectrum.
+
+        Parameters
+        ----------
+        power_db      : full power spectrum array (dB)
+        peak_idx      : index of the signal peak (excluded from noise candidates)
+        fft_size      : total number of FFT bins
+        passband_mask : optional boolean array, same length as power_db.
+                        When provided (e.g. LPF is active), only bins inside
+                        the passband are considered for noise estimation.
+                        This prevents filter stopband rolloff bins from being
+                        mistaken for the noise floor.
+
+        Returns
+        -------
+        float : estimated noise floor in dB
+        """
+
+        # ── Step 1: build candidate set ──────────────────────────────────────
+        if passband_mask is not None and np.any(passband_mask):
+            # Only look at in-passband bins
+            candidates = power_db[passband_mask]
+            # Re-map peak_idx into the masked array for exclusion
+            masked_indices = np.where(passband_mask)[0]
+            # searchsorted gives insertion point — clamp to valid range
+            peak_in_mask = int(np.searchsorted(masked_indices, peak_idx))
+            peak_in_mask = min(peak_in_mask, len(masked_indices) - 1)
         else:
-            noise_candidates = center_band
+            # No mask: use center 50% of spectrum to avoid LPF roll-offs at edges
+            q = fft_size // 4
+            candidates = power_db[q: 3 * q]
+            peak_in_mask = peak_idx - q
+
+        # ── Step 2: exclude the signal peak region ────────────────────────────
+        exclude_width = max(2, fft_size // 40)
+        mask = np.ones(len(candidates), dtype=bool)
+        lo = max(0, peak_in_mask - exclude_width)
+        hi = min(len(candidates), peak_in_mask + exclude_width + 1)
+        mask[lo:hi] = False
+        noise_candidates = candidates[mask]
 
         if len(noise_candidates) == 0:
             return float(np.median(power_db))
 
-        # 3. Sort and take the median of the bottom 50% of these valid passband bins
-        # This completely ignores the top 50% (which might contain signal skirts)
+        # ── Step 3: median of the bottom 50% — ignores signal skirts ─────────
         sorted_pwr = np.sort(noise_candidates)
         noise_db = float(np.median(sorted_pwr[:max(1, len(sorted_pwr) // 2)]))
         return noise_db
