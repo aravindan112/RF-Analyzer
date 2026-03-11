@@ -62,7 +62,7 @@ def clear_all_datasets():
 @app.post("/api/load")
 async def load_file(
     file: UploadFile = File(...),
-    fs_mhz: float = 32.768,
+    fs_mhz: float = 10.0,
     bin_dtype: str = "auto",
     hex_signed: bool = True,
     q15_format: bool = False,
@@ -71,8 +71,6 @@ async def load_file(
     max_samples: int = 0,
 ):
     suffix = os.path.splitext(file.filename)[1]
-    # FIX: preserve the original suffix so DataLoader extension detection works
-    # even for files with no extension (suffix becomes empty string which is fine)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix if suffix else '.tmp') as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
@@ -102,7 +100,6 @@ async def load_file(
     if isinstance(result, list):
         loaded = []
         for item in result:
-            # Each item is a 5-tuple
             if len(item) != 5:
                 continue
             signal, data_format, mode_detected, raw_hex, ch_name = item
@@ -144,7 +141,6 @@ async def load_file(
         }
 
     # ── Single-signal path ────────────────────────────────────────────────
-    # result should be a 4-tuple: (signal, data_format, mode, preview)
     if not isinstance(result, tuple) or len(result) != 4:
         return {"error": f"Unexpected loader result type: {type(result)}"}
 
@@ -198,7 +194,7 @@ def list_files():
 # ── DSP Parameters ─────────────────────────────────────────────────────────
 
 class DSPParams(BaseModel):
-    fs_mhz:         float = 32.768
+    fs_mhz:         float = 10.0
     decimation:     int   = 1
     use_lpf:        bool  = False
     lpf_taps:       int   = 101
@@ -252,7 +248,7 @@ def get_iq_timeseries(
 
     i = _sanitize(data.real)
     q = _sanitize(data.imag)
-    return {"t": t.tolist(), "i": i.tolist(), "q": q.tolist()}  
+    return {"t": t.tolist(), "i": i.tolist(), "q": q.tolist()}
 
 
 # ── Spectrum ───────────────────────────────────────────────────────────────
@@ -287,29 +283,24 @@ def get_spectrum(
 
     if normalize_db:
         power_db -= np.max(power_db)
-    power_db = _sanitize(power_db)
-    freqs    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
-    peak_idx = int(np.argmax(power_db))
+
+    power_db    = _sanitize(power_db)
+    freqs       = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
+    peak_idx    = int(np.argmax(power_db))
     peak_db_val = float(power_db[peak_idx])
-    
+
     # Pre-filter deep LPF stopband nulls before noise estimation
-    # Stopbands usually plunge ~80+ dB below the peak. Dynamically mask anything
-    # 100 dB below the peak, removing the rigid -120 dB hardcode.
     dynamic_threshold = peak_db_val - 100.0
-    valid_bins = power_db[power_db > dynamic_threshold]
-    floor_clamp = float(np.percentile(valid_bins, 5)) if len(valid_bins) > 10 else dynamic_threshold
+    valid_bins        = power_db[power_db > dynamic_threshold]
+    floor_clamp       = float(np.percentile(valid_bins, 5)) if len(valid_bins) > 10 else dynamic_threshold
     power_db_for_noise = np.clip(power_db, floor_clamp, 0.0)
 
-    # Calculate noise density per bin
+    # Estimate noise floor
     noise_db_per_bin = DSPProcessor.estimate_noise_floor(power_db_for_noise, peak_idx, fft_size)
 
-    # Calculate True SNR (Integrated Signal Power / Total Integrated Noise Power)
-    # 1. Integrate the signal peak (peak ± 3 bins)
-    peak_linear = np.sum(10 ** (power_db[max(0, peak_idx - 3) : min(fft_size, peak_idx + 4)] / 10))
-    # 2. Integrate noise density across the entire FFT band
-    total_noise_linear = (10 ** (noise_db_per_bin / 10)) * fft_size
-    # 3. True SNR
-    snr_db = 10 * np.log10(peak_linear / total_noise_linear + 1e-20)
+    # SNR = peak power minus noise floor
+    # Simple, intuitive reading — what SDR users expect to see
+    snr_db = peak_db_val - float(noise_db_per_bin)
 
     return {
         "freqs":      freqs.tolist(),
@@ -375,7 +366,7 @@ def get_spectrogram(
         spec.append(_compute_frame_psd(frame, fft_size, eff_fs).tolist())
         times.append(position_ms + (i * hop / eff_fs) * 1000.0)
 
-    spec = _sanitize(np.array(spec)).tolist()   
+    spec = _sanitize(np.array(spec)).tolist()
 
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     return {"spec": spec, "times": times, "freqs": freqs.tolist()}
@@ -414,8 +405,8 @@ def get_cfar(
     noise_floor = np.convolve(power_db, kernel, mode='same')
     threshold   = noise_floor + thr
     mask        = np.ones(Nf, dtype=bool)
-    mask[:r+g]      = False
-    mask[-(r+g):]   = False
+    mask[:r+g]    = False
+    mask[-(r+g):] = False
     peaks = np.where((power_db > threshold) & mask)[0]
 
     return {
@@ -454,9 +445,6 @@ def get_filter_response():
 
 
 # ── DoA ────────────────────────────────────────────────────────────────────
-# FIX: Accept dataset_ids as a comma-separated single string OR repeated params.
-# FastAPI's List[str] = Query(None) works in dev but can fail in some
-# packaged / proxy setups.  This approach handles both.
 
 @app.get("/api/doa")
 def get_doa(
@@ -468,7 +456,6 @@ def get_doa(
     # Supports: ?dataset_ids=a&dataset_ids=b  AND  ?dataset_ids=a,b
     raw_ids: List[str] = []
     for val in request.query_params.getlist("dataset_ids"):
-        # Each val may be a single id or comma-separated ids
         for part in val.split(","):
             part = part.strip()
             if part:
