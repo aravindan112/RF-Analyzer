@@ -15,12 +15,19 @@ function formatMetrics(data) {
   const el = data.peak_el ?? 0;
   const peakMhz = data.peak_mhz;
 
-  const pairs = (data.pair_info || []).map((p, k) => ({
+  // FIXED — converts phase difference to arrival angle in degrees
+  const pairs = (data.pair_info || []).map((p, k) => {
+    const dphi = p.dphi || 0;
+    // arcsin(Δφ / (2π × d/λ)), d/λ = 0.5 → arcsin(Δφ / π)
+    const sinVal = Math.max(-1, Math.min(1, (dphi * Math.PI / 180) / Math.PI));
+    const angleDeg = Math.asin(sinVal) * (180 / Math.PI);
+    return {
     label: p.label || `Pair ${k + 1}`,
     color: PAIR_COLORS[k % PAIR_COLORS.length],
-    dphi: p.dphi || 0,
-    angle: p.dphi || 0,
-  }));
+    dphi,
+    angle: parseFloat(angleDeg.toFixed(2)),
+  };
+})
 
   return { az, el, pairs, meanAngle: az, stdAngle: 0, peakMhz };
 }
@@ -32,7 +39,7 @@ function PolarNeedle({ title, angleDeg, color, width, height }) {
   const trace = {
     type: 'scatterpolar',
     r: [0, 0.95],
-    theta: [0, ang],
+    theta: [0, (ang + 90) % 360],
     mode: 'lines+markers',
     line: { color, width: 3.5 },
     marker: { color, size: [5, 13], symbol: ['circle', 'star'] },
@@ -195,7 +202,7 @@ function PairTable({ pairs, meanAngle }) {
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
-            {['Pair', 'Δφ', 'Angle'].map(h => (
+            {['Pair', 'Δφ (deg)', 'AoA (deg)'].map(h => (
               <th key={h} style={head()}>{h}</th>
             ))}
           </tr>
