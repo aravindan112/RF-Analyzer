@@ -114,7 +114,7 @@ export default function SpectrumChart({
   const [normalise, setNormalise] = useState(false);
 
   const [centerMhz, setCenterMhz] = useState(0.0);
-  // FIX: zsWindowMs is now driven by prop; local setter notifies parent
+  // zsWindowMs is driven by prop; local setter notifies parent
   const zsWindowMs = zsWindowMsProp;
   const setZsWindowMs = useCallback((v) => {
     if (onZsWindowChange) onZsWindowChange(v);
@@ -257,7 +257,6 @@ export default function SpectrumChart({
           break;
         }
 
-        // ── Free run ───────────────────────────────────────────────────────
         setZsData(data);
         setRevision(r => r + 1);
         setZsState('running');
@@ -289,7 +288,7 @@ export default function SpectrumChart({
     zs_stop();
   }, [activeDatasetId, zs_stop]);
 
-  // ── Prune stale datasets when targetIds changes (Bug 1 fix) ───────────────
+  // ── Prune stale datasets when targetIds changes ───────────────────────────
   const targetIds = compareMode && compareIds.length > 0 ? compareIds : (activeDatasetId ? [activeDatasetId] : []);
   useEffect(() => {
     setDatasets(prev => {
@@ -303,7 +302,7 @@ export default function SpectrumChart({
     if (!activeDatasetId) { setZsData(null); setZsError(null); }
   }, [targetIds.join(','), activeDatasetId]);
 
-  // ── Freq-span polling ─────────────────────────────────────────────────────
+  // ── Freq-span: refresh on position/window/fft/dsp changes ────────────────
   useEffect(() => {
     if (mode !== 'freq') return;
     fetchFreqSpan();
@@ -312,6 +311,13 @@ export default function SpectrumChart({
   useEffect(() => {
     if (mode === 'freq') fetchFreqSpan();
   }, [positionMs, windowMs, fftSize, dspVersion, avgFrames, normalise, fetchFreqSpan]);
+
+  // FIX: also refresh when compareMode or compareIds change.
+  // Without this, toggling Compare Mode or checking/unchecking files in the
+  // sidebar had no effect on the spectrum until some other param changed.
+  useEffect(() => {
+    if (mode === 'freq') fetchFreqSpan();
+  }, [compareMode, compareIds.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const zsFetchingRef = useRef(false);
   const fetchZeroSpan = useCallback(async () => {
@@ -348,8 +354,6 @@ export default function SpectrumChart({
   const zsStateRef = useRef('stopped');
   useEffect(() => { zsStateRef.current = zsState; }, [zsState]);
 
-  // Debounce timer ref — prevents a rapid slider drag from firing
-  // zs_start() or fetchZeroSpan() on every intermediate tick.
   const zsDebounceRef = useRef(null);
 
   useEffect(() => {
@@ -386,9 +390,13 @@ export default function SpectrumChart({
   const zsDynRange = zsPeakPwr != null && zsMinPwr != null ? zsPeakPwr - zsMinPwr : null;
 
   // ── Freq-span traces ──────────────────────────────────────────────────────
+  // FIX: peak correctness — `primary` is the dataset with the globally highest
+  // peak_db across all loaded datasets. The peak marker is rendered only on
+  // the primary trace to avoid duplicate diamonds when in compare mode.
   const primary = Object.values(datasets).reduce((best, d) =>
     (!best || (d.peak_db ?? -Infinity) > (best.peak_db ?? -Infinity)) ? d : best
-    , null) ?? datasets[activeDatasetId];
+  , null) ?? datasets[activeDatasetId];
+
   const fsTraces = Object.entries(datasets).flatMap(([id, d], idx) => {
     const fi = fileOrder.indexOf(id), color = fileColors[(fi >= 0 ? fi : idx) % fileColors.length], isMain = id === activeDatasetId;
     const isPrimary = primary && d.peak_db === primary.peak_db && d.peak_mhz === primary.peak_mhz;
@@ -398,6 +406,7 @@ export default function SpectrumChart({
       line: { color, width: isMain ? 1.5 : 1.2 }, fill: 'tozeroy', fillcolor: hexToRgba(color, 0.05),
       hovertemplate: `<b>${id.slice(0, 20)}</b><br>%{x:.4f} MHz | %{y:.1f} dB<br><i>Click → 0-Span</i><extra></extra>`,
     }];
+    // Only render the peak diamond on the primary (highest-peak) dataset
     if (isPrimary && d.peak_mhz != null) out.push({
       x: [d.peak_mhz], y: [d.peak_db], type: 'scatter', mode: 'markers+text',
       marker: { color: '#ff4d6d', size: 10, symbol: 'diamond', line: { color: '#fff', width: 1 } },
@@ -491,7 +500,6 @@ export default function SpectrumChart({
           <VSep />
           <TInput label="Center" unit="MHz" value={centerMhz} min={-500} max={500} step={0.001} width={80}
             onChange={setCenterMhz} onCommit={() => { if (isRunning) zs_start(); }} />
-          {/* FIX: Window input now calls setZsWindowMs which notifies App.jsx */}
           <TInput label="Window" unit="ms" value={zsWindowMs} min={1} max={10000} step={1} width={68}
             onChange={setZsWindowMs} onCommit={() => { if (isRunning) zs_start(); }} />
           <TInput label="FFT" value={zsFftSize} min={64} max={8192} step={64} width={60}
@@ -502,7 +510,6 @@ export default function SpectrumChart({
             onChange={() => { setDcDownconvert(v => !v); if (isRunning) setTimeout(zs_start, 0); }} />
           <VSep />
 
-          {/* Status badge */}
           {isRunning ? (
             <div style={{ padding: '3px 10px', borderRadius: 3, fontSize: 9, ...mono, fontWeight: 700, background: 'rgba(90,222,154,0.1)', color: '#5ade9a', border: '1px solid rgba(90,222,154,0.35)', flexShrink: 0 }}>
               ● RUNNING
@@ -513,7 +520,6 @@ export default function SpectrumChart({
             </div>
           )}
 
-          {/* RUN / STOP */}
           {!isRunning ? (
             <button onClick={zs_start} disabled={!activeDatasetId}
               style={{

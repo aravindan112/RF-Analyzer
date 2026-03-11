@@ -81,6 +81,8 @@ export default function App() {
   const [positionPct, setPositionPct] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
+  const [fileInputKey, setFileInputKey] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [compareMode, setCompareMode] = useState(false);
   const [compareFiles, setCompareFiles] = useState([]);
   const [applying, setApplying] = useState(false);
@@ -168,15 +170,21 @@ export default function App() {
     } catch (e) { console.error("Clear failed:", e); }
   };
 
+
   const uploadFile = async (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    setUploading(true); setUploadError(null);
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    setUploadProgress(`Uploading ${file.name} (${(file.size / 1e6).toFixed(1)} MB)…`);
+
     const fd = new FormData();
     fd.append('file', file);
     fd.append('fs_mhz', dspRef.current?.fs_mhz ?? dsp.fs_mhz);
     fd.append('bin_dtype', dsp.bin_dtype);
     fd.append('hex_signed', dsp.hex_signed);
     fd.append('q15_format', dsp.q15_format);
+
     try {
       const res = await fetch(`${BASE}/api/load`, { method: 'POST', body: fd });
       const data = await res.json();
@@ -200,7 +208,6 @@ export default function App() {
           });
           return next;
         });
-        // Auto-enable compare mode and select all channels
         setCompareMode(true);
         setCompareFiles(newIds);
         await applyDsp();
@@ -212,11 +219,24 @@ export default function App() {
       setFiles(prev => [...prev, id]);
       setCurrentFile(id);
       setPositionPct(0);
-      setFileInfo(prev => ({ ...prev, [id]: { duration_ms: data.duration_ms || 0, total_samples: data.total_samples || 0, data_format: data.data_format || '' } }));
+      setFileInfo(prev => ({
+        ...prev,
+        [id]: {
+          duration_ms: data.duration_ms || 0,
+          total_samples: data.total_samples || 0,
+          data_format: data.data_format || ''
+        }
+      }));
       await applyDsp();
-    } catch (err) { setUploadError(`Upload error: ${err.message}`); }
-    finally { setUploading(false); e.target.value = ''; }
+    } catch (err) {
+      setUploadError(`Upload error: ${err.message}`);
+    } finally {
+      setUploading(false);
+      setUploadProgress(null);
+      setFileInputKey(k => k + 1);  // ← KEY FIX: remount input so same file can be re-selected
+    }
   };
+
 
   const handleRemoveFile = useCallback((id) => {
     fetch(`${BASE}/api/remove/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => { });
@@ -282,7 +302,7 @@ export default function App() {
           <div style={{ display: 'flex', gap: 6, marginBottom: 7 }}>
             <label style={{ flex: 1, textAlign: 'center', padding: '6px 0', fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', background: uploading ? '#1a2535' : '#00d4ff', color: uploading ? '#4a6a8a' : '#080c18', cursor: 'pointer', borderRadius: 3, fontFamily: 'monospace' }}>
               {uploading ? 'LOADING…' : '+ ADD FILE'}
-              <input type="file" hidden onChange={uploadFile} disabled={uploading} />
+              <input key={fileInputKey} type="file" hidden onChange={uploadFile} disabled={uploading} />
             </label>
             {currentFile && <button onClick={() => handleRemoveFile(currentFile)} style={{ padding: '6px 10px', background: 'transparent', border: '1px solid #2a3a5a', color: '#ff4d6d', cursor: 'pointer', fontSize: 10, borderRadius: 3, fontFamily: 'monospace' }}>✕</button>}
           </div>
@@ -290,6 +310,11 @@ export default function App() {
             <div style={{ fontSize: 9, color: '#ff4d6d', fontFamily: 'monospace', background: 'rgba(255,77,109,0.08)', border: '1px solid rgba(255,77,109,0.25)', borderRadius: 3, padding: '5px 7px', marginBottom: 4, lineHeight: 1.4, wordBreak: 'break-word' }}>
               ⚠ {uploadError}
               <span onClick={() => setUploadError(null)} style={{ float: 'right', cursor: 'pointer', opacity: 0.6 }}>✕</span>
+            </div>
+          )}
+          {uploadProgress && !uploadError && (
+            <div style={{ fontSize: 9, color: '#5ab4d4', fontFamily: 'monospace', background: 'rgba(0,212,255,0.06)', border: '1px solid rgba(0,212,255,0.2)', borderRadius: 3, padding: '5px 7px', marginBottom: 4, lineHeight: 1.4 }}>
+              ⌛ {uploadProgress}
             </div>
           )}
           <div style={{ minHeight: 30, background: '#080c18', border: '1px solid #0f1520', borderRadius: 3, padding: '4px 6px', display: 'flex', flexDirection: 'column', gap: 3 }}>

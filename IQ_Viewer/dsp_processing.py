@@ -90,19 +90,26 @@ class DSPProcessor:
 
     @staticmethod
     def estimate_noise_floor(power_db, peak_idx, fft_size):
-        center = fft_size // 2
-        dc_exclude = max(2, fft_size // 200)          # exclude DC ±1%
-        sig_exclude = max(dc_exclude, fft_size // 20)  # exclude peak ±5%
+        # 1. Restrict to center 50% to avoid LPF roll-offs at the edges
+        q = fft_size // 4
+        center_band = power_db[q : 3*q]
+        
+        # 2. Exclude the signal peak area from the candidates
+        peak_idx_rel = peak_idx - q
+        if 0 <= peak_idx_rel < len(center_band):
+            # Exclude ±2.5% around the peak
+            exclude_width = max(2, fft_size // 40)
+            mask = np.ones(len(center_band), dtype=bool)
+            mask[max(0, peak_idx_rel - exclude_width) : min(len(center_band), peak_idx_rel + exclude_width + 1)] = False
+            noise_candidates = center_band[mask]
+        else:
+            noise_candidates = center_band
 
-        mask = np.ones(fft_size, dtype=bool)
-        mask[center - dc_exclude: center + dc_exclude + 1] = False
-        mask[max(0, peak_idx - sig_exclude): min(fft_size, peak_idx + sig_exclude + 1)] = False
-
-        noise_candidates = power_db[mask]
         if len(noise_candidates) == 0:
             return float(np.median(power_db))
 
+        # 3. Sort and take the median of the bottom 50% of these valid passband bins
+        # This completely ignores the top 50% (which might contain signal skirts)
         sorted_pwr = np.sort(noise_candidates)
-        # Bottom third is a more stable estimator than bottom 20%
-        noise_db = float(np.median(sorted_pwr[:max(1, len(sorted_pwr) // 3)]))
+        noise_db = float(np.median(sorted_pwr[:max(1, len(sorted_pwr) // 2)]))
         return noise_db

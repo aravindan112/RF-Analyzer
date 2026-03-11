@@ -294,7 +294,8 @@ export default function DoaChart({
 
     setLoading(true);
     try {
-      const url = new URL(`${BASE}/api/doa`);
+      const qs = new URLSearchParams();
+
 
       // FIX: backend only accepts 'dataset_ids' (plural, List[str]).
       // Old code sent 'dataset_id' (singular) for the single-file path,
@@ -302,17 +303,17 @@ export default function DoaChart({
       // always returned "requires at least 2 channels".
       // Now we always append to 'dataset_ids' regardless of mode.
       if (hasCompare) {
-        compareIds.forEach(id => url.searchParams.append('dataset_ids', id));
+        compareIds.forEach(id => qs.append('dataset_ids', id));
       } else {
         // Single file: backend will still return "need 2 channels" error,
         // which is the correct behaviour — DoA genuinely needs ≥2 signals.
-        url.searchParams.append('dataset_ids', activeDatasetId);
+        qs.append('dataset_ids', activeDatasetId);
       }
 
-      url.searchParams.append('position_ms', positionMs);
-      url.searchParams.append('window_ms', windowMs);
+      qs.append('position_ms', positionMs);
+      qs.append('window_ms', windowMs);
 
-      const res = await fetch(url.toString());
+      const res = await fetch(`${BASE}/api/doa?${qs.toString()}`);
       if (res.status === 404) throw new Error('endpoint_missing');
 
       const d = await res.json();

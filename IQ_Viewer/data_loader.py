@@ -1,7 +1,7 @@
 """
-data_loader.py  –  RF Analyzer data loader (fixed)
+data_loader.py  –  RF Analyzer data loader (fixed v2)
 
-Key fixes over v1:
+Key fixes over v1/v2:
   1. ILA CSV  – full-scale derived from the [MSB:LSB] annotation in each
                 column header (e.g. [15:0] → ÷32768, [31:0] → ÷2147483648,
                 [11:0] → ÷2048).  Falls back to a safe per-column auto-detect
@@ -16,9 +16,16 @@ Key fixes over v1:
                 > 1 the loader now applies the same auto-detect full-scale
                 logic so that 12-bit / 14-bit / 16-bit ADC files all come
                 out correctly scaled.
-  5. Binary   – no functional change; kept identical to v1.
-  6. Hex/text – no functional change; kept identical to v1.
-  7. General  – all public parse paths return a consistent 4-tuple or list
+  5. TXT FIX  – detect_generic_csv now correctly rejects plain-text complex
+                files (e.g. "+0.1-0.2j" per line) so they reach
+                load_standard_text instead of being mis-parsed as CSV.
+  6. TXT FIX  – load_standard_text handles multiple formats:
+                  • One complex number per line  (+0.1-0.2j  or  0.1 0.2)
+                  • Two space/comma-separated floats per line (I Q)
+                  • Lines with 'i' suffix for imaginary part
+  7. Binary   – no functional change; kept identical to v1.
+  8. Hex/text – no functional change; kept identical to v1.
+  9. General  – all public parse paths return a consistent 4-tuple or list
                 of 5-tuples; None is only returned on hard errors or user
                 abort, never on an empty-but-valid file.
 """
@@ -93,6 +100,49 @@ def _full_scale_for_column(header_name: str, radix: str,
 
     max_abs = float(np.abs(raw_col).max()) if len(raw_col) else 0.0
     return _auto_full_scale(max_abs)
+
+
+def _looks_like_complex_text(path: str) -> bool:
+    """
+    Peek at the first few non-comment lines of a text file.
+    Returns True if the lines look like complex numbers (one per line)
+    rather than CSV data.  This prevents detect_generic_csv from
+    swallowing plain-text IQ files.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines_checked = 0
+            complex_hits  = 0
+            two_col_hits  = 0
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith('#'):
+                    continue
+                lines_checked += 1
+                if lines_checked > 20:
+                    break
+                # Try parsing as a single complex number
+                try:
+                    complex(s.replace('i', 'j').replace(' ', ''))
+                    complex_hits += 1
+                    continue
+                except ValueError:
+                    pass
+                # Try two whitespace/comma-separated floats (I Q)
+                parts = re.split(r'[\s,]+', s)
+                if len(parts) == 2:
+                    try:
+                        float(parts[0]); float(parts[1])
+                        two_col_hits += 1
+                        continue
+                    except ValueError:
+                        pass
+            if lines_checked == 0:
+                return False
+            # If the majority of lines parse as complex/two-float, it's a txt IQ file
+            return (complex_hits + two_col_hits) >= (lines_checked * 0.7)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +238,6 @@ class _CSVParser:
         """
         Load an ILA CSV export and return a list of
         ``(signal, data_format, "dual", preview, ch_name)`` tuples.
-
-        Normalisation is now per-column, using the bit-width declared in the
-        column header (e.g. ``[15:0]`` → ÷32768, ``[31:0]`` → ÷2147483648).
-        When no annotation is present the full-scale is auto-detected from
-        the data so that 8 / 10 / 12 / 14-bit signals are handled correctly.
         """
         if progress_callback:
             progress_callback(
@@ -246,11 +291,9 @@ class _CSVParser:
                     progress_callback(f"Error parsing {ch_name}: {e}")
                 continue
 
-            # ── Per-column normalisation (the core fix) ──────────────────────
+            # ── Per-column normalisation ──────────────────────────────────────
             fs_i = _full_scale_for_column(hdr_i, radix_type, raw_I)
             fs_q = _full_scale_for_column(hdr_q, radix_type, raw_Q)
-            # Use the same divisor for both I and Q so the constellation
-            # is not distorted; pick the larger of the two.
             full_scale = max(fs_i, fs_q)
 
             I = raw_I / full_scale
@@ -280,6 +323,14 @@ class _CSVParser:
 
     @staticmethod
     def detect_generic_csv(path: str):
+        """
+        FIX: Now rejects plain-text complex-number files early (via
+        _looks_like_complex_text) so they reach load_standard_text instead.
+        """
+        # Don't mis-detect plain IQ text files as CSV
+        if _looks_like_complex_text(path):
+            return False, None
+
         try:
             with open(path, newline='', encoding='utf-8', errors='ignore') as f:
                 sample = f.read(4096)
@@ -305,6 +356,11 @@ class _CSVParser:
             return False, None
 
         if not rows:
+            return False, None
+
+        # Reject single-column files — those are plain text, not CSV
+        max_cols = max(len(r) for r in rows)
+        if max_cols < 2:
             return False, None
 
         header_row_idx = -1
@@ -474,18 +530,13 @@ class _CSVParser:
 
         # ── Helper: normalise raw float array if it looks like integer ADC data ──
         def _normalise(arr: np.ndarray) -> np.ndarray:
-            """
-            If all values are whole numbers and |max| > 1, apply auto full-scale.
-            Otherwise assume data is already in [-1, 1] and leave it alone.
-            """
             max_abs = float(np.abs(arr).max()) if len(arr) else 0.0
             if max_abs <= 1.0:
                 return arr
-            # Check if the values look like integers (ADC counts)
             if np.all(arr == arr.astype(np.int64)):
                 fs = _auto_full_scale(max_abs)
                 return arr / fs
-            return arr  # already floating-point normalised
+            return arr
 
         if info.get('is_interleaved'):
             ch_name = info['channels'][0]['name']
@@ -677,6 +728,12 @@ class _HexTextParser:
                     stripped = line.strip()
                     if stripped and not stripped.startswith('#'):
                         parts = stripped.split()
+                        if len(parts) == 1 and len(parts[0]) == 8:
+                            try:
+                                int(parts[0], 16)
+                                return "dual"  # concatenated IQ
+                            except ValueError:
+                                pass
                         return "single" if len(parts) == 1 else "dual"
         except Exception:
             pass
@@ -690,10 +747,11 @@ class _HexTextParser:
 
         mode = "dual"
         if channel_mode_var:
-            mode = channel_mode_var.get()
-            if mode == "auto":
+            raw = channel_mode_var.get() if hasattr(channel_mode_var, 'get') else channel_mode_var
+            if raw == "auto":
                 mode = _HexTextParser.detect_channel_mode(path)
-                channel_mode_var.set(mode)
+            else:
+                mode = raw  
         else:
             mode = _HexTextParser.detect_channel_mode(path)
 
@@ -714,6 +772,13 @@ class _HexTextParser:
                     break
                 try:
                     parts = stripped.split()
+                    if len(parts) == 1 and len(parts[0]) == 8:
+                        try:
+                            int(parts[0], 16)  # confirm it's valid hex
+                            parts = [parts[0][:4], parts[0][4:]]
+                            mode = "dual"
+                        except ValueError:
+                            pass
                     if mode == "single":
                         if parts:
                             val = int(parts[0], 16)
@@ -744,6 +809,17 @@ class _HexTextParser:
                     pass
 
         signal = np.array(data, dtype=np.complex64)
+
+        # ── Auto-normalize if values look like raw ADC counts ─────────────────
+        # Hex IQ files from FPGAs/ADCs are often 12-16 bit integers stored as
+        # hex strings.  If the max amplitude is > 1, snap to the nearest standard
+        # ADC full-scale so that the spectrum reads in proper dBFS.
+        if len(signal) > 0:
+            max_abs = float(max(np.abs(signal.real).max(), np.abs(signal.imag).max()))
+            if max_abs > 1.0 and not q15_format:
+                fs = _auto_full_scale(max_abs)
+                signal = (signal.real / fs + 1j * signal.imag / fs).astype(np.complex64)
+
         data_format = f"Hex Data – {file_size_mb:.1f} MB"
         if max_samples:
             data_format += f" (Partial: {max_samples:,} samples)"
@@ -752,31 +828,110 @@ class _HexTextParser:
     @staticmethod
     def load_standard_text(path, file_size_mb, max_samples, stop_event,
                            progress_callback):
+        """
+        FIX v2: Handles multiple plain-text IQ formats:
+          1. One complex number per line:  +0.1-0.2j  or  0.1+0.2i
+          2. Two floats per line (I Q):   0.1 0.2   or   0.1, 0.2
+          3. Interleaved single floats:   one real number per line (I then Q alternating)
+        """
         if progress_callback:
             progress_callback(f"Loading text file ({file_size_mb:.1f} MB)…")
 
         data = []
         count = 0
         preview = ["--- Text Data Preview ---"]
+        interleaved_buf = []   # used if we detect single-float-per-line format
 
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line_no, line in enumerate(f):
-                if stop_event and line_no % 1000 == 0 and stop_event.is_set():
-                    return None, None, None, None
-                stripped = line.strip()
-                if stripped.startswith('#'):
-                    continue
-                if line_no < 500:
-                    preview.append(f"{line_no:06d}: {stripped}")
-                parsed = stripped.replace('i', 'j').replace(' ', '')
-                if parsed:
+        # First pass: detect format from first non-comment line
+        fmt = 'complex'   # default
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    s = line.strip()
+                    if s and not s.startswith('#'):
+                        parts = re.split(r'[\s,]+', s)
+                        if len(parts) == 2:
+                            try:
+                                float(parts[0]); float(parts[1])
+                                fmt = 'two_col'
+                                break
+                            except ValueError:
+                                pass
+                        # Try single float (interleaved)
+                        if len(parts) == 1:
+                            try:
+                                float(parts[0])
+                                fmt = 'interleaved'
+                                break
+                            except ValueError:
+                                pass
+                        # Otherwise assume complex notation
+                        break
+        except Exception:
+            pass
+
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line_no, line in enumerate(f):
+                    if stop_event and line_no % 1000 == 0 and stop_event.is_set():
+                        return None, None, None, None
+                    stripped = line.strip()
+                    if stripped.startswith('#'):
+                        continue
+                    if line_no < 500:
+                        preview.append(f"{line_no:06d}: {stripped}")
+                    if not stripped:
+                        continue
                     if max_samples and count >= max_samples:
                         break
+
                     try:
-                        data.append(complex(parsed))
-                        count += 1
+                        if fmt == 'two_col':
+                            parts = re.split(r'[\s,]+', stripped)
+                            if len(parts) >= 2:
+                                i_val = float(parts[0])
+                                q_val = float(parts[1])
+                                data.append(complex(i_val, q_val))
+                                count += 1
+                        elif fmt == 'interleaved':
+                            parts = re.split(r'[\s,]+', stripped)
+                            for p in parts:
+                                if p:
+                                    interleaved_buf.append(float(p))
+                        else:
+                            # Complex notation: replace 'i' suffix with 'j'
+                            parsed = stripped.replace(' ', '').replace('i', 'j')
+                            # Handle cases like "0.1 0.2" that slipped through
+                            if 'j' not in parsed and 'J' not in parsed:
+                                parts = re.split(r'[\s,]+', stripped)
+                                if len(parts) == 2:
+                                    try:
+                                        data.append(complex(float(parts[0]), float(parts[1])))
+                                        count += 1
+                                        continue
+                                    except ValueError:
+                                        pass
+                            data.append(complex(parsed))
+                            count += 1
                     except Exception:
-                        pass
+                        pass   # skip unparseable lines silently
+
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Error reading text file: {e}")
+            return None, None, None, None
+
+        # Reassemble interleaved buffer
+        if fmt == 'interleaved' and interleaved_buf:
+            n = len(interleaved_buf) // 2
+            for k in range(n):
+                data.append(complex(interleaved_buf[2 * k], interleaved_buf[2 * k + 1]))
+                count += 1
+
+        if not data:
+            if progress_callback:
+                progress_callback("No parseable IQ data found in text file.")
+            return None, None, None, None
 
         signal = np.array(data, dtype=np.complex64)
         data_format = f"Text (Complex) – {file_size_mb:.1f} MB"
@@ -819,7 +974,9 @@ class DataLoader:
         ILA CSV (Vivado / Vitis), Generic IQ CSV, NumPy .npy,
         Binary (cf32 / fc32 / cf64 / cs16 / sc8 / u8 / …),
         Hex text (space-separated 16-bit hex pairs),
-        Plain complex text (``+0.1-0.2j`` per line).
+        Plain complex text (``+0.1-0.2j`` per line),
+        Two-column text (I and Q on each line),
+        Interleaved single-float text.
         """
         file_size_mb = os.path.getsize(path) / (1024 * 1024)
         ext = os.path.splitext(path)[1].lower()
@@ -858,7 +1015,7 @@ class DataLoader:
                         stop_event, progress_callback, iq_pairs,
                     )
 
-                # 2. Try generic IQ CSV
+                # 2. Try generic IQ CSV (now rejects plain-text IQ files correctly)
                 is_generic, generic_info = _CSVParser.detect_generic_csv(path)
                 if is_generic:
                     return _CSVParser.load_generic_csv(

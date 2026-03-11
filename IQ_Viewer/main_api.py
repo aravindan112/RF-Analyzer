@@ -1,9 +1,10 @@
 import os
 import tempfile
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from typing import List, Optional
 from pydantic import BaseModel
 import uvicorn
@@ -24,22 +25,30 @@ app.add_middleware(
 data_manager = DataManager()
 
 
+# ── Global exception handler so the .exe never returns a raw 500 ──────────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"error": f"Internal server error: {type(exc).__name__}: {exc}"},
+    )
+
+
 def _compute_frame_psd(frame: np.ndarray, fft_size: int, eff_fs: float) -> np.ndarray:
     """
     Compute power spectrum of one frame in dBFS.
 
-    FIX (was broken):
-      OLD: win_norm = win / sqrt(sum(win²))  then  psd = |X|²/eff_fs
-           → added ~-78 dB offset at 65 MHz because of the /eff_fs PSD conversion.
-           → result was in W/Hz (power spectral density), not dBFS.
-      NEW: win_norm = win / sum(win)  (amplitude-coherent normalisation)
-           → |X[peak_bin]| == signal amplitude for a pure tone → 0 dBFS = full scale.
-           → No /eff_fs division, so values are sample-rate independent.
+    Amplitude-coherent window normalisation: win / sum(win)
+    → |X[peak_bin]| == signal amplitude for a pure tone → 0 dBFS = full scale.
     """
     win      = np.hanning(fft_size)
-    win_norm = win / np.sum(win)                              # FIX: was /sqrt(sum(win²))
+    win_norm = win / np.sum(win)
     X        = np.fft.fftshift(np.fft.fft(frame * win_norm, n=fft_size))
-    return 20 * np.log10(np.abs(X) + 1e-20)                  # FIX: was 10*log10(|X|²/eff_fs)
+    return 20 * np.log10(np.abs(X) + 1e-20)
+
+def _sanitize(arr):
+    """Replace nan/inf with 0 so JSON serialization never crashes."""
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=-200.0)
 
 
 # ── File Management ────────────────────────────────────────────────────────
@@ -62,7 +71,9 @@ async def load_file(
     max_samples: int = 0,
 ):
     suffix = os.path.splitext(file.filename)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    # FIX: preserve the original suffix so DataLoader extension detection works
+    # even for files with no extension (suffix becomes empty string which is fine)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix if suffix else '.tmp') as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
@@ -76,17 +87,26 @@ async def load_file(
             q15_format=q15_format,
             bin_dtype=bin_dtype,
         )
+    except Exception as e:
+        return {"error": f"Loader exception: {type(e).__name__}: {e}"}
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
     if result is None:
-        return {"error": "Failed to load file"}
+        return {"error": "Failed to load file — format not recognised or file is empty"}
 
     # ── Multi-channel ILA CSV ─────────────────────────────────────────────
     if isinstance(result, list):
         loaded = []
-        for (signal, data_format, mode_detected, raw_hex, ch_name) in result:
-            if signal is None:
+        for item in result:
+            # Each item is a 5-tuple
+            if len(item) != 5:
+                continue
+            signal, data_format, mode_detected, raw_hex, ch_name = item
+            if signal is None or len(signal) == 0:
                 continue
             base_id    = f"{file.filename}:{ch_name}"
             dataset_id = base_id
@@ -124,10 +144,17 @@ async def load_file(
         }
 
     # ── Single-signal path ────────────────────────────────────────────────
+    # result should be a 4-tuple: (signal, data_format, mode, preview)
+    if not isinstance(result, tuple) or len(result) != 4:
+        return {"error": f"Unexpected loader result type: {type(result)}"}
+
     signal, data_format, mode_detected, raw_hex = result
 
     if signal is None:
-        return {"error": "Failed to load file"}
+        return {"error": "Failed to load file — loader returned no signal"}
+
+    if len(signal) == 0:
+        return {"error": "File loaded but contained 0 samples — check file format and content"}
 
     dataset_id = file.filename
     count      = 1
@@ -223,7 +250,9 @@ def get_iq_timeseries(
     t      = t[::step]
     data   = data[::step]
 
-    return {"t": t.tolist(), "i": data.real.tolist(), "q": data.imag.tolist()}
+    i = _sanitize(data.real)
+    q = _sanitize(data.imag)
+    return {"t": t.tolist(), "i": i.tolist(), "q": q.tolist()}  
 
 
 # ── Spectrum ───────────────────────────────────────────────────────────────
@@ -248,7 +277,6 @@ def get_spectrum(
     data = data - np.mean(data)
 
     if average_frames and num_frames > 1:
-        # Average in linear power domain, convert back to dB
         pwr_accum = np.zeros(fft_size)
         for j in range(num_frames):
             frame      = data[j * fft_size:(j + 1) * fft_size]
@@ -259,21 +287,37 @@ def get_spectrum(
 
     if normalize_db:
         power_db -= np.max(power_db)
-
+    power_db = _sanitize(power_db)
     freqs    = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     peak_idx = int(np.argmax(power_db))
-    noise_db = DSPProcessor.estimate_noise_floor(power_db, peak_idx, fft_size)
-    # FIX: removed hard clamp at -120 dB.
-    # The clamp was masking the true noise floor and producing a fake SNR.
-    # estimate_noise_floor now returns the real value in dBFS.
+    peak_db_val = float(power_db[peak_idx])
+    
+    # Pre-filter deep LPF stopband nulls before noise estimation
+    # Stopbands usually plunge ~80+ dB below the peak. Dynamically mask anything
+    # 100 dB below the peak, removing the rigid -120 dB hardcode.
+    dynamic_threshold = peak_db_val - 100.0
+    valid_bins = power_db[power_db > dynamic_threshold]
+    floor_clamp = float(np.percentile(valid_bins, 5)) if len(valid_bins) > 10 else dynamic_threshold
+    power_db_for_noise = np.clip(power_db, floor_clamp, 0.0)
+
+    # Calculate noise density per bin
+    noise_db_per_bin = DSPProcessor.estimate_noise_floor(power_db_for_noise, peak_idx, fft_size)
+
+    # Calculate True SNR (Integrated Signal Power / Total Integrated Noise Power)
+    # 1. Integrate the signal peak (peak ± 3 bins)
+    peak_linear = np.sum(10 ** (power_db[max(0, peak_idx - 3) : min(fft_size, peak_idx + 4)] / 10))
+    # 2. Integrate noise density across the entire FFT band
+    total_noise_linear = (10 ** (noise_db_per_bin / 10)) * fft_size
+    # 3. True SNR
+    snr_db = 10 * np.log10(peak_linear / total_noise_linear + 1e-20)
 
     return {
         "freqs":      freqs.tolist(),
         "power_db":   power_db.tolist(),
         "peak_mhz":   float(freqs[peak_idx]),
         "peak_db":    float(power_db[peak_idx]),
-        "noise_db":   float(noise_db),
-        "snr_db":     float(power_db[peak_idx]) - float(noise_db),
+        "noise_db":   float(noise_db_per_bin),
+        "snr_db":     float(snr_db),
         "num_frames": num_frames,
     }
 
@@ -330,6 +374,8 @@ def get_spectrogram(
         frame = data[i * hop: i * hop + fft_size]
         spec.append(_compute_frame_psd(frame, fft_size, eff_fs).tolist())
         times.append(position_ms + (i * hop / eff_fs) * 1000.0)
+
+    spec = _sanitize(np.array(spec)).tolist()   
 
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, 1 / eff_fs)) / 1e6
     return {"spec": spec, "times": times, "freqs": freqs.tolist()}
@@ -408,16 +454,34 @@ def get_filter_response():
 
 
 # ── DoA ────────────────────────────────────────────────────────────────────
+# FIX: Accept dataset_ids as a comma-separated single string OR repeated params.
+# FastAPI's List[str] = Query(None) works in dev but can fail in some
+# packaged / proxy setups.  This approach handles both.
 
 @app.get("/api/doa")
 def get_doa(
-    dataset_ids: List[str] = Query(None),
+    request: Request,
     position_ms: float = 0.0,
     window_ms:   float = 10.0,
 ):
-    ids = dataset_ids or []
+    # Parse dataset_ids robustly from raw query string
+    # Supports: ?dataset_ids=a&dataset_ids=b  AND  ?dataset_ids=a,b
+    raw_ids: List[str] = []
+    for val in request.query_params.getlist("dataset_ids"):
+        # Each val may be a single id or comma-separated ids
+        for part in val.split(","):
+            part = part.strip()
+            if part:
+                raw_ids.append(part)
+
+    ids = raw_ids
     if len(ids) < 2:
-        return {"error": "DoA requires at least 2 channels. Enable Compare Mode and select multiple files."}
+        return {
+            "error": (
+                "DoA requires at least 2 channels. "
+                "Enable Compare Mode and select multiple files."
+            )
+        }
 
     ids.sort()
     signals = [data_manager.get_window(position_ms, window_ms, dataset_id=i) for i in ids]
@@ -430,7 +494,12 @@ def get_doa(
     M = X.shape[0]
 
     if N < 4 * M:
-        return {"error": f"Too few snapshots ({N}) for {M} channels. Increase Analysis Window so N ≥ {4 * M}."}
+        return {
+            "error": (
+                f"Too few snapshots ({N}) for {M} channels. "
+                f"Increase Analysis Window so N ≥ {4 * M}."
+            )
+        }
 
     rows    = data_manager.doa_rows
     cols    = data_manager.doa_cols
@@ -441,7 +510,12 @@ def get_doa(
     if mode == "ULA":
         rows, cols, spacing = 1, M, 0.5
     elif rows * cols != M:
-        return {"error": f"2D Rect Layout ({rows}x{cols}) does not match selected files ({M})."}
+        return {
+            "error": (
+                f"2D Rect Layout ({rows}x{cols}) does not match "
+                f"selected files ({M})."
+            )
+        }
 
     fft_size = min(1024, N)
     ref_fft  = np.fft.fftshift(np.fft.fft(X[0, :fft_size]))
@@ -529,11 +603,8 @@ def get_zero_span(
     if n_frames <= 0:
         return {"error": "Not enough data for zero-span. Increase Window (ms)."}
 
-    # FIX: use amplitude-coherent window normalisation (win / sum(win))
-    # so that a tone of amplitude A gives |X[peak_bin]| = A → dBFS is correct.
-    # OLD used win / sqrt(sum(win²)) with a /ref division that was dimensionally wrong.
     win      = np.hanning(zs_fft_size)
-    win_norm = win / np.sum(win)                              # FIX: amplitude-normalised
+    win_norm = win / np.sum(win)
 
     freqs            = np.fft.fftshift(np.fft.fftfreq(zs_fft_size, d=1.0 / eff_fs))
     target_freq      = center_mhz * 1e6
@@ -554,10 +625,6 @@ def get_zero_span(
             break
         X    = np.fft.fftshift(np.fft.fft(frame * win_norm, n=zs_fft_size))
         band = X[bin_lo:bin_hi]
-
-        # FIX: power = sum of squared amplitudes in band (no /ref division needed
-        # because win_norm already ensures correct amplitude scaling).
-        # Use 20*log10 base so that 0 dBFS = amplitude of 1.0.
         psd_val = float(np.sum(np.abs(band) ** 2))
         powers_db.append(float(10 * np.log10(psd_val + 1e-20)))
         times_ms.append(float(position_ms + (start / eff_fs) * 1000.0))
@@ -615,14 +682,11 @@ def get_zero_span(
 
 # ── Serve React build ──────────────────────────────────────────────────────
 
-# ── Locate frontend/dist whether running as .py or .exe ──────────────────
 import sys as _sys
 if getattr(_sys, 'frozen', False):
-    # Running inside PyInstaller bundle — files are in _MEIPASS
     _base = _sys._MEIPASS
 else:
     _base = os.path.dirname(os.path.abspath(__file__))
-    # When running normally, frontend/dist is two levels up from IQ_Viewer/
     _base = os.path.dirname(_base)
 
 _frontend_dist = os.path.join(_base, "frontend", "dist")

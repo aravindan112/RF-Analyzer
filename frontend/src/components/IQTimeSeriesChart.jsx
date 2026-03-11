@@ -19,10 +19,9 @@ export default function IQTimeSeriesChart({
   const [revision, setRevision] = useState(0);
   const [dims, setDims] = useState({ width: 800, height: 500 });
   const containerRef = useRef(null);
-
   const fetchingRef = useRef(false);
 
-  // ── container-size tracking ─────────────────────────────────────────────────
+  // ── container-size tracking ──────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
     const ro = new ResizeObserver(([e]) => {
@@ -64,9 +63,7 @@ export default function IQTimeSeriesChart({
     finally { setLoading(false); fetchingRef.current = false; }
   }, [targetIds.join(','), positionMs, windowMs, dspVersion]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   // Prune stale datasets when targetIds changes
   useEffect(() => {
@@ -78,7 +75,7 @@ export default function IQTimeSeriesChart({
     });
   }, [targetIds.join(',')]);
 
-  // ── Build split I / Q traces ─────────────────────────────────────────────────
+  // ── Build split I / Q traces ─────────────────────────────────────────────
   const iTraces = [];
   const qTraces = [];
   const multi = Object.keys(datasets).length > 1;
@@ -90,40 +87,51 @@ export default function IQTimeSeriesChart({
     const qColor = adjustAlpha(iColor, 0.75);
     const shortId = id.length > 16 ? id.slice(0, 14) + '…' : id;
 
+    // I trace → top panel (xaxis:'x', yaxis:'y')
     iTraces.push({
       x: d.t, y: d.i,
-      type: 'scatter', mode: 'lines', xaxis: 'x', yaxis: 'y',
+      type: 'scatter', mode: 'lines',
+      xaxis: 'x', yaxis: 'y',
       name: multi ? `I · ${shortId}` : 'I — In-Phase',
       line: { color: iColor, width: 1.4 },
       hovertemplate: '%{x:.3f} ms | I: %{y:.5f}<extra></extra>',
     });
 
+    // FIX: Q trace → bottom panel (xaxis:'x2', yaxis:'y2')
+    // Previously used xaxis:'x' which attached Q data to the top panel's
+    // x-axis even though Q was rendered in the bottom domain via yaxis:'y2'.
+    // This caused the two panels to share one x-axis reference, so zooming
+    // one panel would not properly sync with the other.
     qTraces.push({
       x: d.t, y: d.q,
-      type: 'scatter', mode: 'lines', xaxis: 'x', yaxis: 'y2',
+      type: 'scatter', mode: 'lines',
+      xaxis: 'x2', yaxis: 'y2',
       name: multi ? `Q · ${shortId}` : 'Q — Quadrature',
-      line: { color: qColor, width: 1.4, dash: multi ? 'solid' : 'solid' },
+      line: { color: qColor, width: 1.4 },
       hovertemplate: '%{x:.3f} ms | Q: %{y:.5f}<extra></extra>',
     });
   });
 
   const allTraces = [...iTraces, ...qTraces];
 
-  // Panel split: I takes top 50 %, Q bottom 50 % with a gap
   const layout = {
-    uirevision: 'iqts-split',
+    // FIX: use a data-driven uirevision so zoom resets when file changes
+    uirevision: targetIds.join(','),
     paper_bgcolor: '#0a0e1a',
     plot_bgcolor: '#080c18',
     width: dims.width,
     height: dims.height,
     margin: { l: 58, r: 18, t: 10, b: 46 },
 
-    // ── I subplot (top) ──────────────────────────────────────────────────────
+    // ── I subplot (top) ──────────────────────────────────────────────────
     xaxis: {
-      anchor: 'y', matches: 'x2',
+      // FIX: do NOT set matches here. The top axis (x) is the master.
+      // Previously had matches:'x2' which made the top axis follow the bottom,
+      // the wrong direction — causing both axes to lock to x2's initial range.
+      anchor: 'y',
       color: '#3a4a6a', gridcolor: '#141c2e',
       tickfont: { color: '#5a7090', size: 9, family: 'monospace' },
-      showticklabels: false,  // shared X shown only on bottom panel
+      showticklabels: false,  // x labels shown only on bottom panel
     },
     yaxis: {
       domain: [0.54, 1.0],
@@ -133,9 +141,12 @@ export default function IQTimeSeriesChart({
       zeroline: true, zerolinecolor: '#1e2e48', zerolinewidth: 1,
     },
 
-    // ── Q subplot (bottom) ───────────────────────────────────────────────────
+    // ── Q subplot (bottom) ───────────────────────────────────────────────
     xaxis2: {
       anchor: 'y2',
+      // FIX: bottom axis follows the top master axis (correct direction).
+      // This means zooming either panel keeps both in sync.
+      matches: 'x',
       title: { text: 'Time (ms)', font: { color: '#5a6a8a', size: 10, family: 'monospace' } },
       color: '#3a4a6a', gridcolor: '#141c2e',
       tickfont: { color: '#5a7090', size: 9, family: 'monospace' },
@@ -148,7 +159,6 @@ export default function IQTimeSeriesChart({
       zeroline: true, zerolinecolor: '#1e2e48', zerolinewidth: 1,
     },
 
-    // ── shared opts ─────────────────────────────────────────────────────────
     dragmode: 'zoom',
     modebar: { bgcolor: 'transparent', color: '#3a5070', activecolor: '#00d4ff' },
     legend: {
@@ -160,23 +170,21 @@ export default function IQTimeSeriesChart({
 
     // divider line between panels
     shapes: [{
-      type: 'line',
-      xref: 'paper', yref: 'paper',
+      type: 'line', xref: 'paper', yref: 'paper',
       x0: 0, x1: 1, y0: 0.5, y1: 0.5,
       line: { color: '#1e2e48', width: 1 },
     }],
 
-    // I-panel label
     annotations: [
       {
-        xref: 'paper', yref: 'paper', x: 0.01, y: 1.0, xanchor: 'left', yanchor: 'top',
-        text: '<b>I</b>', showarrow: false,
-        font: { color: '#00d4ff', size: 11, family: 'monospace' }
+        xref: 'paper', yref: 'paper', x: 0.01, y: 1.0,
+        xanchor: 'left', yanchor: 'top', text: '<b>I</b>',
+        showarrow: false, font: { color: '#00d4ff', size: 11, family: 'monospace' },
       },
       {
-        xref: 'paper', yref: 'paper', x: 0.01, y: 0.46, xanchor: 'left', yanchor: 'top',
-        text: '<b>Q</b>', showarrow: false,
-        font: { color: '#ff6b8a', size: 11, family: 'monospace' }
+        xref: 'paper', yref: 'paper', x: 0.01, y: 0.46,
+        xanchor: 'left', yanchor: 'top', text: '<b>Q</b>',
+        showarrow: false, font: { color: '#ff6b8a', size: 11, family: 'monospace' },
       },
     ],
   };
@@ -187,7 +195,7 @@ export default function IQTimeSeriesChart({
   return (
     <div ref={containerRef} style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: '#0a0e1a' }}>
 
-      {/* ── header bar ─────────────────────────────────────────────────── */}
+      {/* ── header bar ────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '7px 12px', borderBottom: '1px solid #141c2e', flexShrink: 0 }}>
         <span style={{ fontSize: 11, color: '#5a6a8a', fontFamily: 'monospace', letterSpacing: '0.1em' }}>IQ TIME SERIES</span>
         <span style={{ fontSize: 10, color: '#4a5a7a', fontFamily: 'monospace' }}>
