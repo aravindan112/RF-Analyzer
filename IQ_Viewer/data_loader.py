@@ -274,12 +274,14 @@ class _CSVParser:
 
             try:
                 if radix_type == 'BINARY':
+                    bw_i = _bit_width_from_header(hdr_i) or 0
+                    bw_q = _bit_width_from_header(hdr_q) or 0
                     raw_I = np.array(
-                        [_BinaryParser.bin_str_to_signed(r[ic], hdr_i) for r in rows],
+                        [_BinaryParser.bin_str_to_signed(r[ic], bw_i) for r in rows],
                         dtype=np.float32,
                     )
                     raw_Q = np.array(
-                        [_BinaryParser.bin_str_to_signed(r[qc], hdr_q) for r in rows],
+                        [_BinaryParser.bin_str_to_signed(r[qc], bw_q) for r in rows],
                         dtype=np.float32,
                     )
                 else:
@@ -490,29 +492,36 @@ class _CSVParser:
                     if info.get('is_interleaved'):
                         ch = info['channels'][0]
                         col = ch['col']
-                        if col < len(row) and _CSVParser.is_number(row[col]):
-                            interleaved_buffer.append(float(row[col]))
-                            is_valid_row = True
+                        if col < len(row):
+                            try:
+                                interleaved_buffer.append(float(row[col]))
+                                is_valid_row = True
+                            except ValueError:
+                                pass
                     else:
                         for ch in info['channels']:
                             if ch['type'] == 'iq':
                                 ic, qc = ch['i_col'], ch['q_col']
-                                if (ic < len(row) and qc < len(row) and
-                                        _CSVParser.is_number(row[ic]) and
-                                        _CSVParser.is_number(row[qc])):
-                                    channels_data[ch['name']]['i'].append(float(row[ic]))
-                                    channels_data[ch['name']]['q'].append(float(row[qc]))
-                                    is_valid_row = True
+                                if ic < len(row) and qc < len(row):
+                                    try:
+                                        fv_i = float(row[ic])
+                                        fv_q = float(row[qc])
+                                        channels_data[ch['name']]['i'].append(fv_i)
+                                        channels_data[ch['name']]['q'].append(fv_q)
+                                        is_valid_row = True
+                                    except ValueError:
+                                        pass
                             elif ch['type'] == 'polar':
                                 mc, pc = ch['mag_col'], ch['phase_col']
-                                if (mc < len(row) and pc < len(row) and
-                                        _CSVParser.is_number(row[mc]) and
-                                        _CSVParser.is_number(row[pc])):
-                                    mag   = float(row[mc])
-                                    phase = float(row[pc])
-                                    channels_data[ch['name']]['i'].append(mag * np.cos(phase))
-                                    channels_data[ch['name']]['q'].append(mag * np.sin(phase))
-                                    is_valid_row = True
+                                if mc < len(row) and pc < len(row):
+                                    try:
+                                        mag   = float(row[mc])
+                                        phase = float(row[pc])
+                                        channels_data[ch['name']]['i'].append(mag * np.cos(phase))
+                                        channels_data[ch['name']]['q'].append(mag * np.sin(phase))
+                                        is_valid_row = True
+                                    except ValueError:
+                                        pass
 
                     if is_valid_row:
                         count += 1
@@ -606,11 +615,11 @@ class _BinaryParser:
         return mapping.get(ext, 'complex64')
 
     @staticmethod
-    def bin_str_to_signed(s: str, header_name: str = '') -> int:
+    def bin_str_to_signed(s: str, bw: int = 0) -> int:
         """
         Convert a binary-string value from an ILA CSV cell to a signed integer.
 
-        Uses the bit-width from *header_name* when available; otherwise infers
+        Uses the provided bit-width bw when > 0; otherwise infers
         width from the string length.
         """
         s = s.strip()
@@ -621,8 +630,8 @@ class _BinaryParser:
         except ValueError:
             return 0
 
-        # Determine bit width: prefer header annotation, then string length
-        bw = _bit_width_from_header(header_name) or len(s)
+        # Determine bit width
+        bw = bw or len(s)
         if val >= (1 << (bw - 1)):
             val -= (1 << bw)
         return val
@@ -630,7 +639,7 @@ class _BinaryParser:
     # kept for backward-compatibility
     @staticmethod
     def bin_str_to_int16(s: str) -> int:
-        return _BinaryParser.bin_str_to_signed(s, '')
+        return _BinaryParser.bin_str_to_signed(s, 0)
 
     @staticmethod
     def load_binary(path, file_size_mb, max_samples, stop_event,
